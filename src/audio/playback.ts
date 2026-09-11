@@ -26,6 +26,8 @@ export class PlaybackEngine {
   private filterSlope: FilterSlope = 24;
   private callbacks: PlaybackCallbacks;
   private updateInterval = 0;
+  private trimStart = 0;
+  private trimEnd = 0;
 
   constructor(callbacks: PlaybackCallbacks) {
     this.callbacks = callbacks;
@@ -33,6 +35,16 @@ export class PlaybackEngine {
 
   setBuffer(buffer: AudioBuffer): void {
     this.buffer = buffer;
+    this.trimEnd = buffer.duration;
+  }
+
+  setTrim(start: number, end: number): void {
+    this.trimStart = start;
+    this.trimEnd = end;
+  }
+
+  getTrimDuration(): number {
+    return this.trimEnd - this.trimStart;
   }
 
   setAutomationPoints(points: AutomationPoint[]): void {
@@ -52,20 +64,24 @@ export class PlaybackEngine {
 
   getCurrentTime(): number {
     if (this.state === 'playing' && this.audioContext) {
-      return this.pauseTime + (this.audioContext.currentTime - this.startTime);
+      const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
+      return bufTime - this.trimStart;
     }
-    return this.pauseTime;
+    return this.pauseTime - this.trimStart;
   }
 
-  play(startFrom?: number): void {
+  play(startFromTrim?: number): void {
     if (!this.buffer) return;
 
-    if (this.state === 'paused' && startFrom === undefined) {
+    if (this.state === 'paused' && startFromTrim === undefined) {
       this.resume();
       return;
     }
 
     this.stop();
+
+    const offset = (startFromTrim ?? (this.pauseTime - this.trimStart)) + this.trimStart;
+    const clampedOffset = Math.max(this.trimStart, Math.min(this.trimEnd, offset));
 
     this.audioContext = new AudioContext();
     this.source = this.audioContext.createBufferSource();
@@ -81,13 +97,12 @@ export class PlaybackEngine {
     lastFilter.connect(this.analyser);
     this.analyser.connect(this.audioContext.destination);
 
-    const offset = startFrom ?? this.pauseTime;
     this.startTime = this.audioContext.currentTime;
-    this.pauseTime = offset;
+    this.pauseTime = clampedOffset;
 
-    this.scheduleFilterAutomation(offset);
+    this.scheduleFilterAutomation(clampedOffset);
 
-    this.source.start(0, offset);
+    this.source.start(0, clampedOffset);
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
 
@@ -136,29 +151,31 @@ export class PlaybackEngine {
 
   pause(): void {
     if (this.state !== 'playing') return;
-    this.pauseTime = this.getCurrentTime();
+    const bufTime = this.pauseTime + (this.audioContext!.currentTime - this.startTime);
+    this.pauseTime = bufTime;
     this.cleanup();
     this.state = 'paused';
     this.callbacks.onStateChange(this.state);
   }
 
   stop(): void {
-    this.pauseTime = 0;
+    this.pauseTime = this.trimStart;
     this.cleanup();
     this.state = 'stopped';
     this.callbacks.onStateChange(this.state);
     this.callbacks.onTimeUpdate(0);
   }
 
-  seek(time: number): void {
+  seek(trimTime: number): void {
     const wasPlaying = this.state === 'playing';
     if (wasPlaying) {
       this.pause();
     }
-    this.pauseTime = Math.max(0, Math.min(time, this.buffer?.duration ?? 0));
-    this.callbacks.onTimeUpdate(this.pauseTime);
+    const clamped = Math.max(0, Math.min(this.getTrimDuration(), trimTime));
+    this.pauseTime = clamped + this.trimStart;
+    this.callbacks.onTimeUpdate(clamped);
     if (wasPlaying) {
-      this.play(this.pauseTime);
+      this.play(clamped);
     }
   }
 
@@ -186,10 +203,9 @@ export class PlaybackEngine {
     this.analyser = null;
   }
 
-  private scheduleFilterAutomation(startOffset: number): void {
+  private scheduleFilterAutomation(bufStartTime: number): void {
     if (!this.audioContext || this.filters.length === 0) return;
 
-    const duration = this.buffer?.duration ?? 0;
     const acNow = this.audioContext.currentTime;
     const step = 0.005;
     const rampDuration = 0.007;
@@ -197,12 +213,14 @@ export class PlaybackEngine {
     for (const filter of this.filters) {
       filter.frequency.cancelScheduledValues(0);
 
-      const initialFreq = Math.max(1, evaluateAutomation(this.automationPoints, startOffset, interpolate));
+      const trimTime = bufStartTime - this.trimStart;
+      const initialFreq = Math.max(1, evaluateAutomation(this.automationPoints, trimTime, interpolate));
       filter.frequency.setValueAtTime(initialFreq, acNow);
 
-      for (let t = startOffset + step; t <= duration; t += step) {
-        const freq = Math.max(1, evaluateAutomation(this.automationPoints, t, interpolate));
-        const rampEnd = acNow + (t - startOffset) + rampDuration;
+      for (let t = bufStartTime + step; t <= this.trimEnd; t += step) {
+        const trimT = t - this.trimStart;
+        const freq = Math.max(1, evaluateAutomation(this.automationPoints, trimT, interpolate));
+        const rampEnd = acNow + (t - bufStartTime) + rampDuration;
         filter.frequency.exponentialRampToValueAtTime(freq, rampEnd);
       }
     }
@@ -210,15 +228,21 @@ export class PlaybackEngine {
 
   private rescheduleFilter(): void {
     if (this.state !== 'playing' || !this.audioContext || this.filters.length === 0) return;
-    const currentTime = this.getCurrentTime();
-    this.scheduleFilterAutomation(currentTime);
+    const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
+    this.scheduleFilterAutomation(bufTime);
   }
 
   private startUpdateLoop(): void {
     clearInterval(this.updateInterval);
     this.updateInterval = window.setInterval(() => {
       if (this.state === 'playing') {
-        this.callbacks.onTimeUpdate(this.getCurrentTime());
+        const trimTime = this.getCurrentTime();
+        if (trimTime >= this.getTrimDuration()) {
+          this.stop();
+          this.callbacks.onEnd();
+        } else {
+          this.callbacks.onTimeUpdate(trimTime);
+        }
       }
     }, 16);
   }

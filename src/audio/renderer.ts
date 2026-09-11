@@ -12,14 +12,16 @@ export async function renderOffline(
   buffer: AudioBuffer,
   points: AutomationPoint[],
   slope: FilterSlope,
+  trimStart: number,
+  trimEnd: number,
   onProgress?: (p: RenderProgress) => void
 ): Promise<Blob> {
   const sampleRate = buffer.sampleRate;
   const channels = buffer.numberOfChannels;
-  const length = buffer.length;
-  const duration = buffer.duration;
+  const trimDuration = trimEnd - trimStart;
+  const trimLength = Math.ceil(trimDuration * sampleRate);
 
-  const offlineCtx = new OfflineAudioContext(channels, length, sampleRate);
+  const offlineCtx = new OfflineAudioContext(channels, trimLength, sampleRate);
 
   const source = offlineCtx.createBufferSource();
   source.buffer = buffer;
@@ -38,7 +40,7 @@ export async function renderOffline(
     filter.frequency.setValueAtTime(initialFreq, 0);
   }
 
-  for (let t = step; t <= duration; t += step) {
+  for (let t = step; t <= trimDuration; t += step) {
     const freq = Math.max(1, evaluateAutomation(points, t, interpolate));
 
     for (const filter of filters) {
@@ -46,7 +48,7 @@ export async function renderOffline(
     }
   }
 
-  source.start(0);
+  source.start(0, trimStart);
 
   const renderedBuffer = await offlineCtx.startRendering();
 

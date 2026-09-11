@@ -7,6 +7,16 @@ export interface AutomationPoint {
   controlFreq: number | null;
 }
 
+export interface Marker {
+  id: number;
+  time: number;
+}
+
+export interface ViewState {
+  viewStart: number;
+  viewEnd: number;
+}
+
 export function evaluateAutomation(
   points: AutomationPoint[],
   time: number,
@@ -32,13 +42,6 @@ export function sortPoints(points: AutomationPoint[]): AutomationPoint[] {
   return [...points].sort((a, b) => a.time - b.time);
 }
 
-export function validatePoints(points: AutomationPoint[]): boolean {
-  for (let i = 0; i < points.length - 1; i++) {
-    if (points[i].time >= points[i + 1].time) return false;
-  }
-  return true;
-}
-
 export function clampFrequency(freq: number): number {
   return Math.max(20, Math.min(20000, freq));
 }
@@ -47,6 +50,12 @@ export function clampTime(time: number, duration: number): number {
   return Math.max(0, Math.min(duration, time));
 }
 
-export function duplicatePoints(points: AutomationPoint[]): AutomationPoint[] {
-  return points.map(p => ({ ...p }));
+export function timeToX(time: number, view: ViewState, canvasWidth: number, paddingLeft: number, paddingRight: number): number {
+  const graphWidth = canvasWidth - paddingLeft - paddingRight;
+  return paddingLeft + ((time - view.viewStart) / (view.viewEnd - view.viewStart)) * graphWidth;
+}
+
+export function xToTime(x: number, view: ViewState, canvasWidth: number, paddingLeft: number, paddingRight: number): number {
+  const graphWidth = canvasWidth - paddingLeft - paddingRight;
+  return view.viewStart + ((x - paddingLeft) / graphWidth) * (view.viewEnd - view.viewStart);
 }

@@ -1,4 +1,4 @@
-import type { AutomationPoint, CurveType } from '../automation/model';
+import type { AutomationPoint, CurveType, ViewState } from '../automation/model';
 import { evaluateAutomation, clampFrequency, clampTime, sortPoints } from '../automation/model';
 import { interpolate } from '../automation/interpolation';
 
@@ -25,6 +25,7 @@ export class AutomationEditor {
   private ctx: CanvasRenderingContext2D;
   private points: AutomationPoint[] = [];
   private duration = 10;
+  private view: ViewState = { viewStart: 0, viewEnd: 10 };
   private selectedIndex: number | null = null;
   private isDraggingPoint = false;
   private dragIndex = -1;
@@ -101,6 +102,11 @@ export class AutomationEditor {
     this.render();
   }
 
+  setView(view: ViewState): void {
+    this.view = view;
+    this.render();
+  }
+
   setPlayhead(time: number): void {
     this.playheadTime = time;
     this.render();
@@ -123,12 +129,12 @@ export class AutomationEditor {
 
   private timeToX(time: number): number {
     const b = this.getGraphBounds();
-    return b.x + (time / this.duration) * b.w;
+    return b.x + ((time - this.view.viewStart) / (this.view.viewEnd - this.view.viewStart)) * b.w;
   }
 
   private xToTime(x: number): number {
     const b = this.getGraphBounds();
-    return ((x - b.x) / b.w) * this.duration;
+    return this.view.viewStart + ((x - b.x) / b.w) * (this.view.viewEnd - this.view.viewStart);
   }
 
   private freqToY(freq: number): number {
@@ -208,7 +214,6 @@ export class AutomationEditor {
 
   private onMouseDown(e: MouseEvent): void {
     if (e.button !== 0) return;
-
     const coords = this.getCanvasCoords(e);
 
     const ctrlIdx = this.findControlHandleAt(coords);
@@ -258,7 +263,7 @@ export class AutomationEditor {
     this.isDraggingPoint = false;
 
     const time = this.xToTime(coords.x);
-    if (time >= 0 && time <= this.duration) {
+    if (time >= this.view.viewStart && time <= this.view.viewEnd) {
       this.callbacks.onSeek(time);
     }
     this.render();
@@ -385,7 +390,7 @@ export class AutomationEditor {
     const time = this.xToTime(coords.x);
     const freq = this.yToFreq(coords.y);
 
-    if (time < 0 || time > this.duration) return;
+    if (time < this.view.viewStart || time > this.view.viewEnd) return;
 
     let curve: CurveType = 'smooth';
     for (let i = 0; i < this.points.length - 1; i++) {
@@ -423,7 +428,7 @@ export class AutomationEditor {
   private showTooltip(time: number, freq: number, clientX: number, clientY: number): void {
     if (!this.tooltip) return;
     const freqStr = freq >= 1000 ? `${(freq / 1000).toFixed(2)} kHz` : `${Math.round(freq)} Hz`;
-    this.tooltip.textContent = `${time.toFixed(2)} s  ${freqStr}`;
+    this.tooltip.textContent = `${time.toFixed(3)} s  ${freqStr}`;
     this.tooltip.style.display = 'block';
     this.tooltip.style.left = `${clientX + 15}px`;
     this.tooltip.style.top = `${clientY - 30}px`;
@@ -437,7 +442,7 @@ export class AutomationEditor {
     const midTime = (pA.time + pB.time) / 2;
     const freq = pA.controlFreq;
     const freqStr = freq >= 1000 ? `${(freq / 1000).toFixed(2)} kHz` : `${Math.round(freq)} Hz`;
-    this.tooltip.textContent = `${midTime.toFixed(2)} s  ${freqStr}`;
+    this.tooltip.textContent = `${midTime.toFixed(3)} s  ${freqStr}`;
     this.tooltip.style.display = 'block';
     this.tooltip.style.left = `${clientX + 15}px`;
     this.tooltip.style.top = `${clientY - 30}px`;
@@ -473,6 +478,7 @@ export class AutomationEditor {
 
     for (let i = 0; i < FREQ_LABELS.length; i++) {
       const y = this.freqToY(FREQ_LABELS[i]);
+      if (y < b.y || y > b.y + b.h) continue;
       ctx.beginPath();
       ctx.moveTo(b.x, y);
       ctx.lineTo(b.x + b.w, y);
@@ -485,8 +491,16 @@ export class AutomationEditor {
       ctx.fillText(FREQ_LABELS_DISPLAY[i], b.x - 8, y);
     }
 
-    const timeStep = this.duration > 20 ? 5 : this.duration > 10 ? 2 : 1;
-    for (let t = 0; t <= this.duration; t += timeStep) {
+    const viewDuration = this.view.viewEnd - this.view.viewStart;
+    let timeStep: number;
+    if (viewDuration > 30) timeStep = 5;
+    else if (viewDuration > 10) timeStep = 2;
+    else if (viewDuration > 5) timeStep = 1;
+    else if (viewDuration > 2) timeStep = 0.5;
+    else timeStep = 0.1;
+
+    const firstTick = Math.ceil(this.view.viewStart / timeStep) * timeStep;
+    for (let t = firstTick; t <= this.view.viewEnd; t += timeStep) {
       const x = this.timeToX(t);
       ctx.beginPath();
       ctx.moveTo(x, b.y);
@@ -497,7 +511,7 @@ export class AutomationEditor {
       ctx.font = `${11}px "SF Mono", "Fira Code", monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText(`${t.toFixed(0)}s`, x, b.y + b.h + 8);
+      ctx.fillText(t >= 10 ? t.toFixed(1) : t.toFixed(2) + 's', x, b.y + b.h + 8);
     }
 
     ctx.strokeStyle = '#2a4a5a';
@@ -605,6 +619,7 @@ export class AutomationEditor {
 
   private drawPlayhead(b: { x: number; y: number; w: number; h: number }): void {
     const x = this.timeToX(this.playheadTime);
+    if (x < b.x || x > b.x + b.w) return;
     const ctx = this.ctx;
 
     ctx.strokeStyle = '#ff6b6b';

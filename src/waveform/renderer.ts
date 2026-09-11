@@ -1,26 +1,94 @@
+import type { ViewState, Marker } from '../automation/model';
+
+const TRIM_HANDLE_WIDTH = 8;
+
 export class WaveformRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private buffer: AudioBuffer | null = null;
   private peaks: Float32Array | null = null;
   private playheadTime = 0;
+  private view: ViewState = { viewStart: 0, viewEnd: 10 };
+  private trimStart = 0;
+  private trimEnd = 10;
+  private markers: Marker[] = [];
+  private selectedMarkerId: number | null = null;
+  private paddingLeft = 40;
+  private paddingRight = 20;
+
+  private isDraggingTrimStart = false;
+  private isDraggingTrimEnd = false;
+  private isDraggingMarker = false;
+  private dragMarkerId: number | null = null;
+
+  private onTrimChange: ((start: number, end: number) => void) | null = null;
+  private onMarkerAdd: ((time: number) => void) | null = null;
+  private onMarkerMove: ((id: number, time: number) => void) | null = null;
+  private onMarkerSelect: ((id: number | null) => void) | null = null;
+  private onSeek: ((time: number) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.setupResizeObserver();
+    this.setupEvents();
   }
 
   private setupResizeObserver(): void {
-    const observer = new ResizeObserver(() => {
-      this.render();
-    });
+    const observer = new ResizeObserver(() => this.render());
     observer.observe(this.canvas);
+  }
+
+  private setupEvents(): void {
+    this.canvas.addEventListener('mousedown', this.onMouseDown.bind(this));
+    this.canvas.addEventListener('mousemove', this.onMouseMove.bind(this));
+    this.canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
+    this.canvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
+    this.canvas.addEventListener('dblclick', this.onDoubleClick.bind(this));
+  }
+
+  setTrimChangeCallback(cb: (start: number, end: number) => void): void {
+    this.onTrimChange = cb;
+  }
+
+  setMarkerCallbacks(
+    onAdd: (time: number) => void,
+    onMove: (id: number, time: number) => void,
+    onSelect: (id: number | null) => void
+  ): void {
+    this.onMarkerAdd = onAdd;
+    this.onMarkerMove = onMove;
+    this.onMarkerSelect = onSelect;
+  }
+
+  setSeekCallback(cb: (time: number) => void): void {
+    this.onSeek = cb;
   }
 
   setBuffer(buffer: AudioBuffer): void {
     this.buffer = buffer;
-    this.peaks = this.extractPeaks(buffer, 2000);
+    this.peaks = this.extractPeaks(buffer, 4000);
+    this.render();
+  }
+
+  setView(view: ViewState): void {
+    this.view = view;
+    this.render();
+  }
+
+  setTrim(start: number, end: number): void {
+    this.trimStart = start;
+    this.trimEnd = end;
+    this.render();
+  }
+
+  setMarkers(markers: Marker[]): void {
+    this.markers = markers;
+    this.render();
+  }
+
+  setSelectedMarker(id: number | null): void {
+    this.selectedMarkerId = id;
     this.render();
   }
 
@@ -29,7 +97,37 @@ export class WaveformRenderer {
     this.render();
   }
 
-  setPlaying(_playing: boolean): void {
+  getPaddingLeft(): number {
+    return this.paddingLeft;
+  }
+
+  getPaddingRight(): number {
+    return this.paddingRight;
+  }
+
+  private getCanvasCoords(e: MouseEvent): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: (e.clientX - rect.left) * dpr,
+      y: (e.clientY - rect.top) * dpr,
+    };
+  }
+
+  private timeToX(time: number): number {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    const w = rect.width * dpr;
+    const graphWidth = w - (this.paddingLeft + this.paddingRight) * dpr;
+    return this.paddingLeft * dpr + ((time - this.view.viewStart) / (this.view.viewEnd - this.view.viewStart)) * graphWidth;
+  }
+
+  private xToTime(x: number): number {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    const w = rect.width * dpr;
+    const graphWidth = w - (this.paddingLeft + this.paddingRight) * dpr;
+    return this.view.viewStart + ((x - this.paddingLeft * dpr) / graphWidth) * (this.view.viewEnd - this.view.viewStart);
   }
 
   private extractPeaks(buffer: AudioBuffer, resolution: number): Float32Array {
@@ -51,18 +149,121 @@ export class WaveformRenderer {
     return peaks;
   }
 
-  timeToX(time: number): number {
-    if (!this.buffer) return 0;
-    const rect = this.canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    return (time / this.buffer.duration) * (rect.width * dpr);
+  private findTrimHandleAt(coords: { x: number; y: number }): 'start' | 'end' | null {
+    const handleW = TRIM_HANDLE_WIDTH * (window.devicePixelRatio || 1);
+    const startX = this.timeToX(this.trimStart);
+    const endX = this.timeToX(this.trimEnd);
+
+    if (Math.abs(coords.x - startX) < handleW) return 'start';
+    if (Math.abs(coords.x - endX) < handleW) return 'end';
+    return null;
   }
 
-  xToTime(x: number): number {
-    if (!this.buffer) return 0;
-    const rect = this.canvas.getBoundingClientRect();
+  private findMarkerAt(coords: { x: number; y: number }): number | null {
+    const hitRadius = 10 * (window.devicePixelRatio || 1);
     const dpr = window.devicePixelRatio || 1;
-    return (x / (rect.width * dpr)) * this.buffer.duration;
+    const rect = this.canvas.getBoundingClientRect();
+    const h = rect.height * dpr;
+    const markerY = h * 0.15;
+
+    for (const m of this.markers) {
+      const mx = this.timeToX(m.time);
+      if (Math.abs(coords.x - mx) < hitRadius && Math.abs(coords.y - markerY) < hitRadius * 2) {
+        return m.id;
+      }
+    }
+    return null;
+  }
+
+  private onMouseDown(e: MouseEvent): void {
+    if (e.button !== 0) return;
+    const coords = this.getCanvasCoords(e);
+
+    const markerId = this.findMarkerAt(coords);
+    if (markerId !== null) {
+      this.isDraggingMarker = true;
+      this.dragMarkerId = markerId;
+      this.onMarkerSelect?.(markerId);
+      return;
+    }
+
+    const handle = this.findTrimHandleAt(coords);
+    if (handle === 'start') {
+      this.isDraggingTrimStart = true;
+      return;
+    }
+    if (handle === 'end') {
+      this.isDraggingTrimEnd = true;
+      return;
+    }
+
+    this.onMarkerSelect?.(null);
+
+    const time = this.xToTime(coords.x);
+    if (time >= this.view.viewStart && time <= this.view.viewEnd) {
+      this.onSeek?.(time);
+    }
+  }
+
+  private onMouseMove(e: MouseEvent): void {
+    const coords = this.getCanvasCoords(e);
+
+    if (this.isDraggingMarker && this.dragMarkerId !== null) {
+      const time = this.xToTime(coords.x);
+      const clamped = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, time));
+      this.onMarkerMove?.(this.dragMarkerId, clamped);
+      return;
+    }
+
+    if (this.isDraggingTrimStart) {
+      const time = this.xToTime(coords.x);
+      const clamped = Math.max(0, Math.min(this.trimEnd - 0.1, time));
+      this.trimStart = clamped;
+      this.onTrimChange?.(this.trimStart, this.trimEnd);
+      this.render();
+      return;
+    }
+
+    if (this.isDraggingTrimEnd) {
+      const time = this.xToTime(coords.x);
+      const duration = this.buffer?.duration ?? 0;
+      const clamped = Math.max(this.trimStart + 0.1, Math.min(duration, time));
+      this.trimEnd = clamped;
+      this.onTrimChange?.(this.trimStart, this.trimEnd);
+      this.render();
+      return;
+    }
+
+    const handle = this.findTrimHandleAt(coords);
+    const markerId = this.findMarkerAt(coords);
+
+    if (handle || markerId !== null) {
+      this.canvas.style.cursor = 'ew-resize';
+    } else {
+      this.canvas.style.cursor = 'crosshair';
+    }
+  }
+
+  private onMouseUp(): void {
+    this.isDraggingTrimStart = false;
+    this.isDraggingTrimEnd = false;
+    this.isDraggingMarker = false;
+    this.dragMarkerId = null;
+  }
+
+  private onMouseLeave(): void {
+    this.onMouseUp();
+  }
+
+  private onDoubleClick(e: MouseEvent): void {
+    const coords = this.getCanvasCoords(e);
+    const markerId = this.findMarkerAt(coords);
+    if (markerId !== null) return;
+
+    const time = this.xToTime(coords.x);
+    if (time >= this.view.viewStart && time <= this.view.viewEnd) {
+      this.onMarkerAdd?.(time);
+    }
   }
 
   render(): void {
@@ -70,41 +271,125 @@ export class WaveformRenderer {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = rect.width * dpr;
     this.canvas.height = rect.height * dpr;
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    this.ctx.clearRect(0, 0, w, h);
 
     if (!this.peaks) return;
 
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-    const centerY = height / 2;
-    const barWidth = width / this.peaks.length;
-
-    this.ctx.fillStyle = '#2a3a4a';
-    for (let i = 0; i < this.peaks.length; i++) {
-      const x = i * barWidth;
-      const amp = this.peaks[i] * centerY * 0.9;
-      this.ctx.fillRect(x, centerY - amp, Math.max(1, barWidth - 0.5), amp * 2);
-    }
-
-    this.ctx.strokeStyle = '#3d5a80';
-    this.ctx.lineWidth = 2;
-    this.ctx.beginPath();
-    this.ctx.moveTo(0, centerY);
-    this.ctx.lineTo(width, centerY);
-    this.ctx.stroke();
-
-    this.drawPlayhead();
+    this.drawTrimRegion(w, h);
+    this.drawWaveform(w, h);
+    this.drawTrimHandles(w, h);
+    this.drawMarkers(w, h);
+    this.drawPlayhead(h);
   }
 
-  private drawPlayhead(): void {
-    const x = this.timeToX(this.playheadTime);
-    const height = this.canvas.height;
+  private drawTrimRegion(w: number, h: number): void {
+    const ctx = this.ctx;
+    const startX = this.timeToX(this.trimStart);
+    const endX = this.timeToX(this.trimEnd);
 
-    this.ctx.strokeStyle = '#ff6b6b';
-    this.ctx.lineWidth = 2;
-    this.ctx.beginPath();
-    this.ctx.moveTo(x, 0);
-    this.ctx.lineTo(x, height);
-    this.ctx.stroke();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.fillRect(0, 0, startX, h);
+    ctx.fillRect(endX, 0, w - endX, h);
+  }
+
+  private drawWaveform(w: number, h: number): void {
+    if (!this.peaks) return;
+    const ctx = this.ctx;
+    const centerY = h / 2;
+    const graphWidth = w - (this.paddingLeft + this.paddingRight) * (window.devicePixelRatio || 1);
+    const startX = this.paddingLeft * (window.devicePixelRatio || 1);
+
+    const viewDuration = this.view.viewEnd - this.view.viewStart;
+    const samplesPerPixel = this.peaks.length / (this.buffer?.duration ?? 1);
+    const pixelsToSamples = (viewDuration / graphWidth) * samplesPerPixel;
+
+    ctx.fillStyle = '#2a3a4a';
+    for (let px = 0; px < graphWidth; px++) {
+      const t = this.view.viewStart + (px / graphWidth) * viewDuration;
+      const sampleIndex = Math.floor(t * samplesPerPixel);
+      const peakIndex = Math.floor(sampleIndex / pixelsToSamples);
+      const clampedIndex = Math.max(0, Math.min(this.peaks.length - 1, peakIndex));
+      const amp = this.peaks[clampedIndex] * centerY * 0.9;
+      ctx.fillRect(startX + px, centerY - amp, 1, amp * 2);
+    }
+  }
+
+  private drawTrimHandles(_w: number, h: number): void {
+    const ctx = this.ctx;
+    const startX = this.timeToX(this.trimStart);
+    const endX = this.timeToX(this.trimEnd);
+    const handleW = TRIM_HANDLE_WIDTH * (window.devicePixelRatio || 1);
+
+    ctx.fillStyle = '#4fc3f7';
+    ctx.fillRect(startX - handleW / 2, 0, handleW, h);
+    ctx.fillRect(endX - handleW / 2, 0, handleW, h);
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+
+    const gripLines = 3;
+    const gripSpacing = 6 * (window.devicePixelRatio || 1);
+
+    for (let i = 0; i < gripLines; i++) {
+      const y = h / 2 + (i - 1) * gripSpacing;
+      ctx.beginPath();
+      ctx.moveTo(startX - 2, y);
+      ctx.lineTo(startX + 2, y);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(endX - 2, y);
+      ctx.lineTo(endX + 2, y);
+      ctx.stroke();
+    }
+  }
+
+  private drawMarkers(_w: number, h: number): void {
+    const ctx = this.ctx;
+    const dpr = window.devicePixelRatio || 1;
+    const markerY = h * 0.15;
+
+    for (const m of this.markers) {
+      const mx = this.timeToX(m.time);
+      const isSelected = m.id === this.selectedMarkerId;
+
+      ctx.strokeStyle = isSelected ? '#ff6b6b' : '#f0c040';
+      ctx.lineWidth = isSelected ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.moveTo(mx, 0);
+      ctx.lineTo(mx, h);
+      ctx.stroke();
+
+      ctx.fillStyle = isSelected ? '#ff6b6b' : '#f0c040';
+      ctx.beginPath();
+      ctx.arc(mx, markerY, isSelected ? 5 * dpr : 4 * dpr, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (isSelected) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = isSelected ? '#ff6b6b' : '#f0c040';
+      ctx.font = `bold ${10 * dpr}px "SF Mono", "Fira Code", monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(m.time.toFixed(3) + 's', mx, markerY - 6 * dpr);
+    }
+  }
+
+  private drawPlayhead(h: number): void {
+    const x = this.timeToX(this.playheadTime);
+    const ctx = this.ctx;
+
+    ctx.strokeStyle = '#ff6b6b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
   }
 }

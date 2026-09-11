@@ -16,14 +16,14 @@
         <button id="open-btn" class="btn btn-primary">Open Audio</button>
         <div id="clip-info" class="clip-info" style="display: none;">
           <span id="file-name" class="file-name"></span>
-          <span id="file-duration" class="file-duration"></span>
+          <span id="trim-duration" class="trim-duration"></span>
         </div>
       </div>
     </header>
 
     <div id="drop-zone" class="drop-zone">
       <div class="drop-zone-content">
-        <div class="drop-icon">♫</div>
+        <div class="drop-icon">&#9835;</div>
         <p class="drop-text">Drop an audio file here</p>
         <p class="drop-subtext">or click "Open Audio" above</p>
         <p class="drop-formats">WAV, MP3, OGG, FLAC, AAC</p>
@@ -32,16 +32,24 @@
     </div>
 
     <div id="editor-area" class="editor-area" style="display: none;">
-      <div class="canvas-section">
-        <div class="section-label">Waveform</div>
+      <div class="waveform-section">
+        <div class="section-header">
+          <span class="section-label">Waveform &amp; Trim</span>
+          <div class="zoom-controls">
+            <label class="control-label">Zoom</label>
+            <input id="zoom-slider" type="range" class="zoom-slider" min="1" max="50" value="1" step="0.5">
+            <button id="zoom-reset-btn" class="btn btn-small">Reset</button>
+          </div>
+        </div>
         <canvas id="waveform-canvas" class="waveform-canvas"></canvas>
       </div>
 
-      <div class="canvas-section">
-        <div class="section-label">Cutoff Automation</div>
-        <div class="automation-container">
-          <canvas id="automation-canvas" class="automation-canvas"></canvas>
+      <div class="automation-section">
+        <div class="section-header">
+          <span class="section-label">Low-Pass Cutoff Automation</span>
+          <span id="marker-display" class="marker-display" style="display: none;"></span>
         </div>
+        <canvas id="automation-canvas" class="automation-canvas"></canvas>
       </div>
 
       <div class="controls-bar">
@@ -54,16 +62,6 @@
               <option value="48">48 dB/oct</option>
             </select>
           </div>
-          <div class="control-group">
-            <label class="control-label">Fade in</label>
-            <input id="fade-in" type="number" class="control-input" value="1.0" min="0" max="30" step="0.1">
-            <span class="control-unit">s</span>
-          </div>
-          <div class="control-group">
-            <label class="control-label">Fade out</label>
-            <input id="fade-out" type="number" class="control-input" value="1.0" min="0" max="30" step="0.1">
-            <span class="control-unit">s</span>
-          </div>
         </div>
 
         <div class="controls-center">
@@ -71,9 +69,12 @@
         </div>
 
         <div class="controls-right">
-          <button id="play-btn" class="btn btn-transport">▶ Play</button>
-          <button id="stop-btn" class="btn btn-transport">⏹ Stop</button>
-          <button id="export-btn" class="btn btn-export">Export WAV</button>
+          <button id="play-btn" class="btn btn-transport">&#9654; Play</button>
+          <button id="stop-btn" class="btn btn-transport">&#9632; Stop</button>
+          <div class="export-group">
+            <button id="export-audio-btn" class="btn btn-export">Export Audio</button>
+            <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled style="opacity: 0.4;">Export Timestamps</button>
+          </div>
         </div>
       </div>
     </div>
