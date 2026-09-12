@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Low-Pass Editor</title>
+  <title>MGMC</title>
   <link rel="stylesheet" href="/src/style.css">
   <script>
     try {
@@ -17,13 +17,13 @@
   <div id="app">
     <header class="header">
       <div class="header-left">
-        <h1 class="title">Low-Pass Editor</h1>
+        <h1 class="title">MGMC</h1>
         <div id="step-indicator" class="step-indicator">
           <span id="step-trim-ind" class="step active">1 &middot; Trim</span>
           <span class="step-arrow">&#8250;</span>
           <span id="step-filter-ind" class="step">2 &middot; Low-Pass</span>
           <span class="step-arrow">&#8250;</span>
-          <span id="step-markers-ind" class="step">3 &middot; Beat Markers</span>
+          <span id="step-markers-ind" class="step">3 &middot; Keyframes</span>
         </div>
       </div>
       <div class="header-right">
@@ -48,7 +48,7 @@
           <div class="drop-icon">&#9835;</div>
           <p class="drop-text">Drop an audio file here</p>
           <button id="open-btn" class="btn btn-primary">Open Audio</button>
-          <p class="drop-subtext">or click "Open Audio" above</p>
+          <p class="drop-subtext">or click "Open Audio"</p>
           <p class="drop-formats">WAV, MP3, OGG, FLAC, AAC</p>
         </div>
         <input type="file" id="file-input" accept="audio/*" style="display: none;">
@@ -197,21 +197,30 @@
   <div id="info-overlay" class="info-overlay" hidden>
     <div class="info-popup" role="dialog" aria-modal="true" aria-labelledby="info-popup-title">
       <div class="info-popup-header">
-        <h2 id="info-popup-title" class="info-popup-title">About Low-Pass Editor</h2>
+        <h2 id="info-popup-title" class="info-popup-title">About MGMC</h2>
         <button id="info-close-btn" class="btn btn-icon" aria-label="Close info popup">&#10005;</button>
       </div>
       <div class="info-popup-body">
         <p class="info-text">
-          Low-Pass Editor is a small in-browser tool for trimming a clip, shaping the low-pass cutoff over time, and marking beats for export. It runs entirely locally — your audio never leaves your machine.
+          Motion Graphics Music Cutter (MGMC) is a small in-browser tool to cut music for motion graphics. It runs entirely locally — your audio never leaves your machine.
         </p>
         <p class="info-text">
-          <strong>How it works:</strong> import an audio file, trim the region you want, shape the cutoff envelope (drag points, bend the curve, right-click a point to toggle linear), place beat markers, then export the filtered clip and the timestamp list.
+          <strong>How it works:</strong> import an audio file, trim the region you want, shape the lowpass cutoff envelope (drag points, bend the curve, right-click a point to toggle linear), place beat markers, then export the audio clip and the timestamp list.
         </p>
         <p class="info-text">
-          Source code and issues live on <a href="#" class="info-link">the project repository</a>.
+          <strong>Controls:</strong>
+          <kbd>Space</kbd> play / pause &middot;
+          <kbd>A</kbd> place a marker &middot;
+          <kbd>Del</kbd> remove the selected marker &middot;
+          <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo / redo &middot;
+          scroll to zoom &middot;
+          <kbd>Shift</kbd>+scroll to pan.
         </p>
         <p class="info-text">
-          <strong>Controls:</strong> <kbd>Space</kbd> play / pause &middot; <kbd>A</kbd> place a marker &middot; <kbd>Del</kbd> remove the selected marker &middot; <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo / redo &middot; scroll to zoom &middot; <kbd>Shift</kbd>+scroll to pan.
+          Check out the <a href="#" class="info-link">project repo</a>!
+        </p>
+        <p class="info-text">
+          Icons by <a href="https://icons8.com" class="info-link">Icons8</a>.
         </p>
       </div>
     </div>
