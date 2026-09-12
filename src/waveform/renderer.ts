@@ -8,6 +8,7 @@ export class WaveformRenderer {
   private buffer: AudioBuffer | null = null;
   private peaks: Float32Array | null = null;
   private playheadTime = 0;
+  private homeTime = 0;
   private view: ViewState = { viewStart: 0, viewEnd: 10 };
   private trimStart = 0;
   private trimEnd = 10;
@@ -20,12 +21,20 @@ export class WaveformRenderer {
   private isDraggingTrimEnd = false;
   private isDraggingMarker = false;
   private dragMarkerId: number | null = null;
+  private trimVisible = true;
+  private markersVisible = true;
 
   private onTrimChange: ((start: number, end: number) => void) | null = null;
   private onMarkerAdd: ((time: number) => void) | null = null;
   private onMarkerMove: ((id: number, time: number) => void) | null = null;
   private onMarkerSelect: ((id: number | null) => void) | null = null;
   private onSeek: ((time: number) => void) | null = null;
+  private onZoomRequest: ((centerTime: number, factor: number) => void) | null = null;
+
+  private hoverX: number | null = null;
+  private deferSeekToDoubleClick = false;
+  private pendingSeekTimer: number | null = null;
+  private lastEmptyClickTime = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -45,6 +54,22 @@ export class WaveformRenderer {
     this.canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
     this.canvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
     this.canvas.addEventListener('dblclick', this.onDoubleClick.bind(this));
+    this.canvas.addEventListener('wheel', this.onWheel.bind(this));
+  }
+
+  setZoomRequestCallback(cb: (centerTime: number, factor: number) => void): void {
+    this.onZoomRequest = cb;
+  }
+
+  setDeferSeekToDoubleClick(defer: boolean): void {
+    this.deferSeekToDoubleClick = defer;
+  }
+
+  getHoverTime(): number | null {
+    if (this.hoverX === null) return null;
+    const t = this.xToTime(this.hoverX);
+    if (t < this.view.viewStart || t > this.view.viewEnd) return null;
+    return t;
   }
 
   setTrimChangeCallback(cb: (start: number, end: number) => void): void {
@@ -82,6 +107,16 @@ export class WaveformRenderer {
     this.render();
   }
 
+  setTrimVisible(visible: boolean): void {
+    this.trimVisible = visible;
+    this.render();
+  }
+
+  setMarkersVisible(visible: boolean): void {
+    this.markersVisible = visible;
+    this.render();
+  }
+
   setMarkers(markers: Marker[]): void {
     this.markers = markers;
     this.render();
@@ -94,6 +129,11 @@ export class WaveformRenderer {
 
   setPlayhead(time: number): void {
     this.playheadTime = time;
+    this.render();
+  }
+
+  setHomeTime(time: number): void {
+    this.homeTime = time;
     this.render();
   }
 
@@ -179,7 +219,7 @@ export class WaveformRenderer {
     if (e.button !== 0) return;
     const coords = this.getCanvasCoords(e);
 
-    const markerId = this.findMarkerAt(coords);
+    const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
     if (markerId !== null) {
       this.isDraggingMarker = true;
       this.dragMarkerId = markerId;
@@ -187,7 +227,7 @@ export class WaveformRenderer {
       return;
     }
 
-    const handle = this.findTrimHandleAt(coords);
+    const handle = this.trimVisible ? this.findTrimHandleAt(coords) : null;
     if (handle === 'start') {
       this.isDraggingTrimStart = true;
       return;
@@ -201,12 +241,51 @@ export class WaveformRenderer {
 
     const time = this.xToTime(coords.x);
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
-      this.onSeek?.(time);
+      if (this.deferSeekToDoubleClick) {
+        this.scheduleDeferredSeek(time);
+      } else {
+        this.onSeek?.(time);
+      }
     }
+  }
+
+  private scheduleDeferredSeek(time: number): void {
+    const now = performance.now();
+    this.clearPendingSeek();
+
+    if (this.lastEmptyClickTime !== 0 && now - this.lastEmptyClickTime < 400) {
+      this.lastEmptyClickTime = now;
+      return;
+    }
+
+    this.lastEmptyClickTime = now;
+    this.pendingSeekTimer = window.setTimeout(() => {
+      if (this.pendingSeekTimer !== null) {
+        this.pendingSeekTimer = null;
+        this.onSeek?.(time);
+      }
+    }, 300);
+  }
+
+  private clearPendingSeek(): void {
+    if (this.pendingSeekTimer !== null) {
+      window.clearTimeout(this.pendingSeekTimer);
+      this.pendingSeekTimer = null;
+    }
+  }
+
+  private onWheel(e: WheelEvent): void {
+    e.preventDefault();
+    if (!this.onZoomRequest) return;
+    const coords = this.getCanvasCoords(e);
+    const center = this.xToTime(coords.x);
+    const factor = Math.pow(1.5, -e.deltaY / 100);
+    this.onZoomRequest(center, factor);
   }
 
   private onMouseMove(e: MouseEvent): void {
     const coords = this.getCanvasCoords(e);
+    this.hoverX = coords.x;
 
     if (this.isDraggingMarker && this.dragMarkerId !== null) {
       const time = this.xToTime(coords.x);
@@ -234,14 +313,15 @@ export class WaveformRenderer {
       return;
     }
 
-    const handle = this.findTrimHandleAt(coords);
-    const markerId = this.findMarkerAt(coords);
+    const handle = this.trimVisible ? this.findTrimHandleAt(coords) : null;
+    const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
 
     if (handle || markerId !== null) {
       this.canvas.style.cursor = 'ew-resize';
     } else {
       this.canvas.style.cursor = 'crosshair';
     }
+    this.render();
   }
 
   private onMouseUp(): void {
@@ -252,11 +332,15 @@ export class WaveformRenderer {
   }
 
   private onMouseLeave(): void {
+    this.hoverX = null;
     this.onMouseUp();
+    this.render();
   }
 
   private onDoubleClick(e: MouseEvent): void {
+    if (!this.markersVisible) return;
     const coords = this.getCanvasCoords(e);
+    this.clearPendingSeek();
     const markerId = this.findMarkerAt(coords);
     if (markerId !== null) return;
 
@@ -264,6 +348,7 @@ export class WaveformRenderer {
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
       this.onMarkerAdd?.(time);
     }
+    this.lastEmptyClickTime = 0;
   }
 
   render(): void {
@@ -277,11 +362,42 @@ export class WaveformRenderer {
 
     if (!this.peaks) return;
 
-    this.drawTrimRegion(w, h);
     this.drawWaveform(w, h);
-    this.drawTrimHandles(w, h);
-    this.drawMarkers(w, h);
+    if (this.trimVisible) {
+      this.drawTrimRegion(w, h);
+      this.drawTrimHandles(w, h);
+    }
+    if (this.markersVisible) {
+      this.drawMarkers(w, h);
+    }
+    this.drawHoverLine(h);
+    this.drawHomeLine(h);
     this.drawPlayhead(h);
+  }
+
+  private drawHoverLine(h: number): void {
+    if (this.hoverX === null) return;
+    const ctx = this.ctx;
+    ctx.strokeStyle = 'rgba(240, 192, 64, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(this.hoverX, 0);
+    ctx.lineTo(this.hoverX, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  private drawHomeLine(h: number): void {
+    if (this.homeTime < this.view.viewStart || this.homeTime > this.view.viewEnd) return;
+    const x = this.timeToX(this.homeTime);
+    const ctx = this.ctx;
+    ctx.strokeStyle = 'rgba(224, 236, 247, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
   }
 
   private drawTrimRegion(w: number, h: number): void {
@@ -295,23 +411,21 @@ export class WaveformRenderer {
   }
 
   private drawWaveform(w: number, h: number): void {
-    if (!this.peaks) return;
+    if (!this.peaks || !this.buffer) return;
+    const dpr = window.devicePixelRatio || 1;
     const ctx = this.ctx;
     const centerY = h / 2;
-    const graphWidth = w - (this.paddingLeft + this.paddingRight) * (window.devicePixelRatio || 1);
-    const startX = this.paddingLeft * (window.devicePixelRatio || 1);
+    const graphWidth = w - (this.paddingLeft + this.paddingRight) * dpr;
+    const startX = this.paddingLeft * dpr;
 
     const viewDuration = this.view.viewEnd - this.view.viewStart;
-    const samplesPerPixel = this.peaks.length / (this.buffer?.duration ?? 1);
-    const pixelsToSamples = (viewDuration / graphWidth) * samplesPerPixel;
+    const peaksPerSecond = this.peaks.length / this.buffer.duration;
 
     ctx.fillStyle = '#2a3a4a';
     for (let px = 0; px < graphWidth; px++) {
       const t = this.view.viewStart + (px / graphWidth) * viewDuration;
-      const sampleIndex = Math.floor(t * samplesPerPixel);
-      const peakIndex = Math.floor(sampleIndex / pixelsToSamples);
-      const clampedIndex = Math.max(0, Math.min(this.peaks.length - 1, peakIndex));
-      const amp = this.peaks[clampedIndex] * centerY * 0.9;
+      const peakIndex = Math.max(0, Math.min(this.peaks.length - 1, Math.floor(t * peaksPerSecond)));
+      const amp = this.peaks[peakIndex] * centerY * 0.9;
       ctx.fillRect(startX + px, centerY - amp, 1, amp * 2);
     }
   }
@@ -377,7 +491,7 @@ export class WaveformRenderer {
       ctx.font = `bold ${10 * dpr}px "SF Mono", "Fira Code", monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillText(m.time.toFixed(3) + 's', mx, markerY - 6 * dpr);
+      ctx.fillText(m.time.toFixed(2) + 's', mx, markerY - 6 * dpr);
     }
   }
 

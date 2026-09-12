@@ -77,4 +77,4 @@ npm run build    # Production build in dist/
 
 ## Browser Support
 
-Modern Chromium and Firefox desktop browsers. Designed for Linux desktop use under tiling Wayland compositors.
+Modern Chromium and Firefox desktop browsers.

@@ -35,6 +35,17 @@ body {
   height: 100vh;
 }
 
+.screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -61,6 +72,41 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 16px;
+}
+
+.step-indicator .step {
+  color: var(--text-muted);
+}
+
+.step-indicator .step.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.step-indicator .step-arrow {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.stage-label {
+  padding: 7px 16px;
+  text-align: center;
+  color: #ffffff;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 
 .clip-info {
@@ -154,9 +200,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 16px;
+  margin: 0;
   border: 2px dashed var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--bg-secondary);
   transition: all 0.2s ease;
 }
@@ -206,6 +252,19 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.trim-waveform-section {
+  flex: 1;
+}
+
+.marker-waveform-section {
+  flex: 1;
+}
+
+.ref-waveform-section {
+  flex: 0.35;
   border-bottom: 1px solid var(--border);
 }
 
@@ -300,6 +359,7 @@ body {
 }
 
 .controls-bar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -308,6 +368,68 @@ body {
   border-top: 1px solid var(--border);
   min-height: 44px;
   flex-shrink: 0;
+}
+
+.export-panel {
+  flex: 0 0 42%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: 18px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.export-panel-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.export-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.export-hint code {
+  font-family: "SF Mono", "Fira Code", monospace;
+  color: var(--accent);
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.export-info-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.info-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.info-value {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.export-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .controls-left {
@@ -331,6 +453,12 @@ body {
 .export-group {
   display: flex;
   gap: 6px;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.step-bar {
   margin-left: 8px;
   padding-left: 8px;
   border-left: 1px solid var(--border);

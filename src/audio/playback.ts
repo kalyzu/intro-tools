@@ -21,9 +21,10 @@ export class PlaybackEngine {
   private state: PlaybackState = 'stopped';
   private startTime = 0;
   private pauseTime = 0;
-  private animationFrame = 0;
+  private homeTime = 0;
   private automationPoints: AutomationPoint[] = [];
   private filterSlope: FilterSlope = 24;
+  private filterEnabled = true;
   private callbacks: PlaybackCallbacks;
   private updateInterval = 0;
   private trimStart = 0;
@@ -43,6 +44,20 @@ export class PlaybackEngine {
     this.trimEnd = end;
   }
 
+  setFilterSlope(slope: FilterSlope): void {
+    this.filterSlope = slope;
+  }
+
+  setFilterEnabled(enabled: boolean): void {
+    if (this.filterEnabled === enabled) return;
+    this.filterEnabled = enabled;
+    if (this.state === 'playing') {
+      const time = this.getCurrentTime();
+      this.stop();
+      this.play(Math.max(0, time));
+    }
+  }
+
   getTrimDuration(): number {
     return this.trimEnd - this.trimStart;
   }
@@ -54,18 +69,13 @@ export class PlaybackEngine {
     }
   }
 
-  setFilterSlope(slope: FilterSlope): void {
-    this.filterSlope = slope;
-  }
-
   getState(): PlaybackState {
     return this.state;
   }
 
   getCurrentTime(): number {
     if (this.state === 'playing' && this.audioContext) {
-      const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
-      return bufTime - this.trimStart;
+      return this.pauseTime + (this.audioContext.currentTime - this.startTime) - this.trimStart;
     }
     return this.pauseTime - this.trimStart;
   }
@@ -78,35 +88,53 @@ export class PlaybackEngine {
       return;
     }
 
-    this.stop();
+    this.cleanup();
 
-    const offset = (startFromTrim ?? (this.pauseTime - this.trimStart)) + this.trimStart;
+    if (this.audioContext) {
+      try {
+        this.audioContext.close();
+      } catch {}
+    }
+
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext();
+    } catch (err) {
+      console.error('Failed to create AudioContext:', err);
+      this.state = 'stopped';
+      this.callbacks.onStateChange(this.state);
+      return;
+    }
+    this.audioContext = ctx;
+
+    const start = startFromTrim ?? this.homeTime;
+    this.homeTime = Math.max(0, Math.min(this.getTrimDuration(), start));
+    const offset = start + this.trimStart;
     const clampedOffset = Math.max(this.trimStart, Math.min(this.trimEnd, offset));
 
-    this.audioContext = new AudioContext();
-    this.source = this.audioContext.createBufferSource();
-    this.source.buffer = this.buffer;
-
-    this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 2048;
-
-    this.filters = createFilterChain(this.audioContext, this.filterSlope);
-    const lastFilter = this.filters[this.filters.length - 1];
-
-    this.source.connect(this.filters[0]);
-    lastFilter.connect(this.analyser);
-    this.analyser.connect(this.audioContext.destination);
-
-    this.startTime = this.audioContext.currentTime;
+    this.startTime = ctx.currentTime;
     this.pauseTime = clampedOffset;
+
+    this.buildGraph(ctx);
+
+    const trimDuration = this.trimEnd - clampedOffset;
+    try {
+      this.source!.start(0, clampedOffset);
+      if (trimDuration > 0) {
+        this.source!.stop(ctx.currentTime + trimDuration);
+      }
+    } catch (err) {
+      console.error('Failed to start playback:', err);
+      this.stop();
+      return;
+    }
 
     this.scheduleFilterAutomation(clampedOffset);
 
-    this.source.start(0, clampedOffset);
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
 
-    this.source.onended = () => {
+    this.source!.onended = () => {
       if (this.state === 'playing') {
         this.stop();
         this.callbacks.onEnd();
@@ -119,27 +147,29 @@ export class PlaybackEngine {
   private resume(): void {
     if (!this.audioContext || !this.buffer) return;
 
-    this.source = this.audioContext.createBufferSource();
-    this.source.buffer = this.buffer;
+    const clampedOffset = Math.max(this.trimStart, Math.min(this.trimEnd, this.pauseTime));
 
-    this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 2048;
-
-    this.filters = createFilterChain(this.audioContext, this.filterSlope);
-    const lastFilter = this.filters[this.filters.length - 1];
-
-    this.source.connect(this.filters[0]);
-    lastFilter.connect(this.analyser);
-    this.analyser.connect(this.audioContext.destination);
-
+    this.buildGraph(this.audioContext);
     this.startTime = this.audioContext.currentTime;
-    this.scheduleFilterAutomation(this.pauseTime);
 
-    this.source.start(0, this.pauseTime);
+    const trimDuration = this.trimEnd - clampedOffset;
+    try {
+      this.source!.start(0, clampedOffset);
+      if (trimDuration > 0) {
+        this.source!.stop(this.audioContext.currentTime + trimDuration);
+      }
+    } catch (err) {
+      console.error('Failed to resume playback:', err);
+      this.stop();
+      return;
+    }
+
+    this.scheduleFilterAutomation(clampedOffset);
+
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
 
-    this.source.onended = () => {
+    this.source!.onended = () => {
       if (this.state === 'playing') {
         this.stop();
         this.callbacks.onEnd();
@@ -151,11 +181,11 @@ export class PlaybackEngine {
 
   pause(): void {
     if (this.state !== 'playing') return;
-    const bufTime = this.pauseTime + (this.audioContext!.currentTime - this.startTime);
-    this.pauseTime = bufTime;
+    this.pauseTime = this.trimStart;
     this.cleanup();
-    this.state = 'paused';
+    this.state = 'stopped';
     this.callbacks.onStateChange(this.state);
+    this.callbacks.onTimeUpdate(this.homeTime);
   }
 
   stop(): void {
@@ -163,7 +193,11 @@ export class PlaybackEngine {
     this.cleanup();
     this.state = 'stopped';
     this.callbacks.onStateChange(this.state);
-    this.callbacks.onTimeUpdate(0);
+    this.callbacks.onTimeUpdate(this.homeTime);
+  }
+
+  getHomeTime(): number {
+    return this.homeTime;
   }
 
   seek(trimTime: number): void {
@@ -172,6 +206,7 @@ export class PlaybackEngine {
       this.pause();
     }
     const clamped = Math.max(0, Math.min(this.getTrimDuration(), trimTime));
+    this.homeTime = clamped;
     this.pauseTime = clamped + this.trimStart;
     this.callbacks.onTimeUpdate(clamped);
     if (wasPlaying) {
@@ -180,7 +215,6 @@ export class PlaybackEngine {
   }
 
   private cleanup(): void {
-    cancelAnimationFrame(this.animationFrame);
     clearInterval(this.updateInterval);
     if (this.source) {
       this.source.onended = null;
@@ -201,6 +235,26 @@ export class PlaybackEngine {
     this.source = null;
     this.filters = [];
     this.analyser = null;
+  }
+
+  private buildGraph(ctx: AudioContext): void {
+    const source = ctx.createBufferSource();
+    source.buffer = this.buffer!;
+    this.source = source;
+
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    this.analyser = analyser;
+
+    if (this.filterEnabled) {
+      this.filters = createFilterChain(ctx, this.filterSlope);
+      source.connect(this.filters[0]);
+      this.filters[this.filters.length - 1].connect(analyser);
+    } else {
+      this.filters = [];
+      source.connect(analyser);
+    }
+    analyser.connect(ctx.destination);
   }
 
   private scheduleFilterAutomation(bufStartTime: number): void {

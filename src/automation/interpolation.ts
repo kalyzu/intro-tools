@@ -25,7 +25,10 @@ export function interpolateSmooth(a: AutomationPoint, b: AutomationPoint, t: num
   const logB = freqToLog(b.frequency);
 
   if (a.controlFreq !== null) {
-    const logC = freqToLog(a.controlFreq);
+    const lo = Math.min(a.frequency, b.frequency);
+    const hi = Math.max(a.frequency, b.frequency);
+    const clamped = Math.max(lo, Math.min(hi, a.controlFreq));
+    const logC = freqToLog(clamped);
     const logVal = quadraticBezier(t, logA, logC, logB);
     return logToFreq(logVal);
   }

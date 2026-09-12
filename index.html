@@ -11,69 +11,170 @@
     <header class="header">
       <div class="header-left">
         <h1 class="title">Low-Pass Editor</h1>
+        <div id="step-indicator" class="step-indicator">
+          <span id="step-trim-ind" class="step active">1 &middot; Trim</span>
+          <span class="step-arrow">&#8250;</span>
+          <span id="step-filter-ind" class="step">2 &middot; Low-Pass</span>
+          <span class="step-arrow">&#8250;</span>
+          <span id="step-markers-ind" class="step">3 &middot; Beat Markers</span>
+        </div>
       </div>
       <div class="header-right">
         <button id="open-btn" class="btn btn-primary">Open Audio</button>
-        <div id="clip-info" class="clip-info" style="display: none;">
+        <div id="clip-info" class="clip-info" hidden>
           <span id="file-name" class="file-name"></span>
           <span id="trim-duration" class="trim-duration"></span>
         </div>
       </div>
     </header>
 
-    <div id="drop-zone" class="drop-zone">
-      <div class="drop-zone-content">
-        <div class="drop-icon">&#9835;</div>
-        <p class="drop-text">Drop an audio file here</p>
-        <p class="drop-subtext">or click "Open Audio" above</p>
-        <p class="drop-formats">WAV, MP3, OGG, FLAC, AAC</p>
+    <div id="stage-label" class="stage-label">Step 1 of 3 &middot; Trim the clip range</div>
+
+    <div id="screen-trim" class="screen">
+      <div id="drop-zone" class="drop-zone">
+        <div class="drop-zone-content">
+          <div class="drop-icon">&#9835;</div>
+          <p class="drop-text">Drop an audio file here</p>
+          <p class="drop-subtext">or click "Open Audio" above</p>
+          <p class="drop-formats">WAV, MP3, OGG, FLAC, AAC</p>
+        </div>
+        <input type="file" id="file-input" accept="audio/*" style="display: none;">
       </div>
-      <input type="file" id="file-input" accept="audio/*" style="display: none;">
+
+      <div id="trim-content" class="editor-area" hidden>
+        <div class="waveform-section trim-waveform-section">
+          <div class="section-header">
+            <span class="section-label">Waveform &middot; Drag blue handles to choose the clip region</span>
+            <div class="zoom-controls">
+              <label class="control-label">Zoom</label>
+              <input id="zoom-slider" type="range" class="zoom-slider" min="1" max="50" value="1" step="0.5">
+              <button id="zoom-reset-btn" class="btn btn-small">Reset</button>
+            </div>
+          </div>
+          <canvas id="waveform-canvas" class="waveform-canvas"></canvas>
+        </div>
+
+        <div class="controls-bar">
+          <div class="controls-left"></div>
+          <div class="controls-center">
+            <span id="trim-time-display" class="time-display">0.00s</span>
+          </div>
+          <div class="controls-right">
+            <button id="trim-play-btn" class="btn btn-transport">&#9654; Play</button>
+            <button id="trim-stop-btn" class="btn btn-transport">&#9632; Stop</button>
+            <div class="step-bar">
+              <button id="continue-btn" class="btn btn-primary" disabled>Continue &#8594;</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <div id="editor-area" class="editor-area" style="display: none;">
-      <div class="waveform-section">
-        <div class="section-header">
-          <span class="section-label">Waveform &amp; Trim</span>
-          <div class="zoom-controls">
-            <label class="control-label">Zoom</label>
-            <input id="zoom-slider" type="range" class="zoom-slider" min="1" max="50" value="1" step="0.5">
-            <button id="zoom-reset-btn" class="btn btn-small">Reset</button>
+    <div id="screen-filter" class="screen" hidden>
+      <div class="editor-area">
+        <div class="waveform-section ref-waveform-section">
+          <div class="section-header">
+            <span class="section-label">Trimmed Clip &middot; Play to preview the low-passed result</span>
+            <div class="zoom-controls">
+              <label class="control-label">Zoom</label>
+              <input id="filter-zoom-slider" type="range" class="zoom-slider" min="1" max="50" value="1" step="0.5">
+              <button id="filter-zoom-reset-btn" class="btn btn-small">Reset</button>
+            </div>
+          </div>
+          <canvas id="ref-waveform-canvas" class="waveform-canvas"></canvas>
+        </div>
+
+        <div class="automation-section">
+          <div class="section-header">
+            <span class="section-label">Low-Pass Cutoff Automation &middot; drag points, click curve to bend, right-click to toggle linear</span>
+          </div>
+          <canvas id="automation-canvas" class="automation-canvas"></canvas>
+        </div>
+
+        <div class="controls-bar">
+          <div class="controls-left">
+            <div class="control-group">
+              <label class="control-label">Low-pass slope</label>
+              <select id="slope-select" class="control-select">
+                <option value="12">12 dB/oct</option>
+                <option value="24" selected>24 dB/oct</option>
+                <option value="48">48 dB/oct</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="controls-center">
+            <span id="filter-time-display" class="time-display">0.00s</span>
+          </div>
+
+          <div class="controls-right">
+            <button id="back-btn" class="btn">&#8592; Trim</button>
+            <button id="filter-play-btn" class="btn btn-transport">&#9654; Play</button>
+            <button id="filter-stop-btn" class="btn btn-transport">&#9632; Stop</button>
+            <div class="step-bar">
+              <button id="filter-continue-btn" class="btn btn-primary">Continue &#8594;</button>
+            </div>
           </div>
         </div>
-        <canvas id="waveform-canvas" class="waveform-canvas"></canvas>
       </div>
+    </div>
 
-      <div class="automation-section">
-        <div class="section-header">
-          <span class="section-label">Low-Pass Cutoff Automation</span>
-          <span id="marker-display" class="marker-display" style="display: none;"></span>
-        </div>
-        <canvas id="automation-canvas" class="automation-canvas"></canvas>
-      </div>
-
-      <div class="controls-bar">
-        <div class="controls-left">
-          <div class="control-group">
-            <label class="control-label">Low-pass</label>
-            <select id="slope-select" class="control-select">
-              <option value="12">12 dB/oct</option>
-              <option value="24" selected>24 dB/oct</option>
-              <option value="48">48 dB/oct</option>
-            </select>
+    <div id="screen-markers" class="screen" hidden>
+      <div class="editor-area">
+        <div class="export-panel">
+          <div class="export-panel-header">
+            <span class="section-label">Export</span>
+            <span class="export-hint">The filtered clip and marker timestamps. Markers are written to a separate <code>.txt</code> file and are not embedded in the audio.</span>
           </div>
-        </div>
 
-        <div class="controls-center">
-          <span id="time-display" class="time-display">0.00s</span>
-        </div>
+          <div class="export-info-grid">
+            <div class="info-item">
+              <span class="info-label">Duration</span>
+              <span id="export-duration" class="info-value">&mdash;</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Sample rate</span>
+              <span id="export-samplerate" class="info-value">&mdash;</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Channels</span>
+              <span id="export-channels" class="info-value">&mdash;</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Low-pass slope</span>
+              <span id="export-slope" class="info-value">&mdash;</span>
+            </div>
+          </div>
 
-        <div class="controls-right">
-          <button id="play-btn" class="btn btn-transport">&#9654; Play</button>
-          <button id="stop-btn" class="btn btn-transport">&#9632; Stop</button>
-          <div class="export-group">
+          <div class="export-actions">
             <button id="export-audio-btn" class="btn btn-export">Export Audio</button>
-            <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled style="opacity: 0.4;">Export Timestamps</button>
+            <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled>Export Timestamps</button>
+          </div>
+        </div>
+
+        <div class="waveform-section marker-waveform-section">
+          <div class="section-header">
+            <span class="section-label">Beat Markers &middot; Double-click or press A to place &middot; Drag to align &middot; Delete to remove &middot; Scroll to zoom</span>
+            <div class="zoom-controls">
+              <label class="control-label">Zoom</label>
+              <input id="marker-zoom-slider" type="range" class="zoom-slider" min="1" max="50" value="1" step="0.5">
+              <button id="marker-zoom-reset-btn" class="btn btn-small">Reset</button>
+            </div>
+          </div>
+          <canvas id="marker-canvas" class="waveform-canvas"></canvas>
+        </div>
+
+        <div class="controls-bar">
+          <div class="controls-left">
+            <span id="marker-display" class="marker-display" hidden></span>
+          </div>
+          <div class="controls-center">
+            <span id="marker-time-display" class="time-display">0.00s</span>
+          </div>
+          <div class="controls-right">
+            <button id="marker-back-btn" class="btn">&#8592; Filter</button>
+            <button id="marker-play-btn" class="btn btn-transport">&#9654; Play</button>
+            <button id="marker-stop-btn" class="btn btn-transport">&#9632; Stop</button>
           </div>
         </div>
       </div>

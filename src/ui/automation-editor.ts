@@ -32,7 +32,9 @@ export class AutomationEditor {
   private dragOffsetX = 0;
   private dragOffsetY = 0;
   private playheadTime = 0;
+  private homeTime = 0;
   private callbacks: AutomationEditorCallbacks;
+  private onZoomRequest: ((centerTime: number, factor: number) => void) | null = null;
   private tooltip: HTMLDivElement | null = null;
   private paddingLeft = 60;
   private paddingRight = 20;
@@ -43,6 +45,7 @@ export class AutomationEditor {
   private isDraggingControl = false;
   private controlDragSegIndex = -1;
   private hoveredSegment = -1;
+  private active = true;
 
   constructor(canvas: HTMLCanvasElement, callbacks: AutomationEditorCallbacks) {
     this.canvas = canvas;
@@ -72,9 +75,11 @@ export class AutomationEditor {
     this.canvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
     this.canvas.addEventListener('dblclick', this.onDoubleClick.bind(this));
     this.canvas.addEventListener('contextmenu', this.onContextMenu.bind(this));
+    this.canvas.addEventListener('wheel', this.onWheel.bind(this));
 
     document.addEventListener('keydown', (e) => {
       this.isShiftDown = e.shiftKey;
+      if (!this.active) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (this.selectedIndex !== null) {
           e.preventDefault();
@@ -110,6 +115,36 @@ export class AutomationEditor {
   setPlayhead(time: number): void {
     this.playheadTime = time;
     this.render();
+  }
+
+  setHomeTime(time: number): void {
+    this.homeTime = time;
+    this.render();
+  }
+
+  setZoomRequestCallback(cb: (centerTime: number, factor: number) => void): void {
+    this.onZoomRequest = cb;
+  }
+
+  private onWheel(e: WheelEvent): void {
+    e.preventDefault();
+    if (!this.onZoomRequest || !this.active) return;
+    const coords = this.getCanvasCoords(e);
+    const center = this.xToTime(coords.x);
+    const factor = Math.pow(1.5, -e.deltaY / 100);
+    this.onZoomRequest(center, factor);
+  }
+
+  setActive(active: boolean): void {
+    this.active = active;
+    if (!active) {
+      this.selectedIndex = null;
+      this.isDraggingPoint = false;
+      this.isDraggingControl = false;
+      this.dragIndex = -1;
+      this.controlDragSegIndex = -1;
+      this.hideTooltip();
+    }
   }
 
   getSelectedIndex(): number | null {
@@ -213,7 +248,7 @@ export class AutomationEditor {
   }
 
   private onMouseDown(e: MouseEvent): void {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !this.active) return;
     const coords = this.getCanvasCoords(e);
 
     const ctrlIdx = this.findControlHandleAt(coords);
@@ -243,10 +278,13 @@ export class AutomationEditor {
     const segIdx = this.findSegmentAt(coords);
     if (segIdx >= 0) {
       const pA = this.points[segIdx];
+      const pB = this.points[segIdx + 1];
       const cursorFreq = this.yToFreq(coords.y);
 
       if (pA.controlFreq === null) {
-        pA.controlFreq = cursorFreq;
+        const lo = Math.min(pA.frequency, pB.frequency);
+        const hi = Math.max(pA.frequency, pB.frequency);
+        pA.controlFreq = Math.max(lo, Math.min(hi, cursorFreq));
       }
 
       this.isDraggingControl = true;
@@ -273,10 +311,15 @@ export class AutomationEditor {
     const coords = this.getCanvasCoords(e);
 
     if (this.isDraggingControl && this.controlDragSegIndex >= 0) {
+      const i = this.controlDragSegIndex;
+      const pA = this.points[i];
+      const pB = this.points[i + 1];
       const newFreq = this.yToFreq(coords.y);
-      this.points[this.controlDragSegIndex].controlFreq = clampFrequency(newFreq);
+      const lo = Math.min(pA.frequency, pB.frequency);
+      const hi = Math.max(pA.frequency, pB.frequency);
+      pA.controlFreq = Math.max(lo, Math.min(hi, clampFrequency(newFreq)));
 
-      this.showControlTooltip(this.controlDragSegIndex, e.clientX, e.clientY);
+      this.showControlTooltip(i, e.clientX, e.clientY);
       this.callbacks.onPointsChange([...this.points]);
       this.render();
       return;
@@ -371,6 +414,7 @@ export class AutomationEditor {
 
   private onContextMenu(e: MouseEvent): void {
     e.preventDefault();
+    if (!this.active) return;
     const coords = this.getCanvasCoords(e);
     const idx = this.findPointAt(coords);
 
@@ -464,10 +508,31 @@ export class AutomationEditor {
     const b = this.getGraphBounds();
 
     this.drawGrid(b);
+
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(b.x, b.y, b.w, b.h);
+    this.ctx.clip();
+
     this.drawCurve(b);
     this.drawControlHandles(b);
     this.drawPoints(b);
+    this.drawHomeLine(b);
     this.drawPlayhead(b);
+
+    this.ctx.restore();
+  }
+
+  private drawHomeLine(b: { x: number; y: number; w: number; h: number }): void {
+    if (this.homeTime < this.view.viewStart || this.homeTime > this.view.viewEnd) return;
+    const x = this.timeToX(this.homeTime);
+    const ctx = this.ctx;
+    ctx.strokeStyle = 'rgba(224, 236, 247, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, b.y);
+    ctx.lineTo(x, b.y + b.h);
+    ctx.stroke();
   }
 
   private drawGrid(b: { x: number; y: number; w: number; h: number }): void {
