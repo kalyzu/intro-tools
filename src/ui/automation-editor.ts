@@ -34,7 +34,8 @@ export class AutomationEditor {
   private playheadTime = 0;
   private homeTime = 0;
   private callbacks: AutomationEditorCallbacks;
-  private onZoomRequest: ((centerTime: number, factor: number) => void) | null = null;
+  private onZoomRequest: ((centerTime: number, factor: number, frac: number) => void) | null = null;
+  private onPanRequest: ((delta: number) => void) | null = null;
   private tooltip: HTMLDivElement | null = null;
   private paddingLeft = 60;
   private paddingRight = 20;
@@ -122,17 +123,28 @@ export class AutomationEditor {
     this.render();
   }
 
-  setZoomRequestCallback(cb: (centerTime: number, factor: number) => void): void {
+  setZoomRequestCallback(cb: (centerTime: number, factor: number, frac: number) => void): void {
     this.onZoomRequest = cb;
+  }
+
+  setPanRequestCallback(cb: (delta: number) => void): void {
+    this.onPanRequest = cb;
   }
 
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
+    if (this.onPanRequest && e.shiftKey) {
+      const delta = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+      this.onPanRequest(delta);
+      return;
+    }
     if (!this.onZoomRequest || !this.active) return;
     const coords = this.getCanvasCoords(e);
+    const b = this.getGraphBounds();
+    const frac = Math.max(0, Math.min(1, (coords.x - b.x) / Math.max(1, b.w)));
     const center = this.xToTime(coords.x);
     const factor = Math.pow(1.5, -e.deltaY / 100);
-    this.onZoomRequest(center, factor);
+    this.onZoomRequest(center, factor, frac);
   }
 
   setActive(active: boolean): void {

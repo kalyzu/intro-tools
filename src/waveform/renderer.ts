@@ -29,7 +29,8 @@ export class WaveformRenderer {
   private onMarkerMove: ((id: number, time: number) => void) | null = null;
   private onMarkerSelect: ((id: number | null) => void) | null = null;
   private onSeek: ((time: number) => void) | null = null;
-  private onZoomRequest: ((centerTime: number, factor: number) => void) | null = null;
+  private onZoomRequest: ((centerTime: number, factor: number, frac: number) => void) | null = null;
+  private onPanRequest: ((delta: number) => void) | null = null;
 
   private hoverX: number | null = null;
   private deferSeekToDoubleClick = false;
@@ -57,8 +58,12 @@ export class WaveformRenderer {
     this.canvas.addEventListener('wheel', this.onWheel.bind(this));
   }
 
-  setZoomRequestCallback(cb: (centerTime: number, factor: number) => void): void {
+  setZoomRequestCallback(cb: (centerTime: number, factor: number, frac: number) => void): void {
     this.onZoomRequest = cb;
+  }
+
+  setPanRequestCallback(cb: (delta: number) => void): void {
+    this.onPanRequest = cb;
   }
 
   setDeferSeekToDoubleClick(defer: boolean): void {
@@ -276,11 +281,20 @@ export class WaveformRenderer {
 
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
+    if (this.onPanRequest && e.shiftKey) {
+      const delta = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+      this.onPanRequest(delta);
+      return;
+    }
     if (!this.onZoomRequest) return;
     const coords = this.getCanvasCoords(e);
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    const graphWidth = rect.width * dpr - (this.paddingLeft + this.paddingRight) * dpr;
+    const frac = Math.max(0, Math.min(1, (coords.x - this.paddingLeft * dpr) / Math.max(1, graphWidth)));
     const center = this.xToTime(coords.x);
     const factor = Math.pow(1.5, -e.deltaY / 100);
-    this.onZoomRequest(center, factor);
+    this.onZoomRequest(center, factor, frac);
   }
 
   private onMouseMove(e: MouseEvent): void {

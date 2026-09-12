@@ -137,9 +137,12 @@ class LowPassEditor {
       this.updateHomeLines();
     });
 
-    this.trimWaveform.setZoomRequestCallback((center, factor) => this.zoomAt(center, factor));
-    this.markerWaveform.setZoomRequestCallback((center, factor) => this.zoomAt(center, factor));
-    this.refWaveform.setZoomRequestCallback((center, factor) => this.zoomAt(center, factor));
+    this.trimWaveform.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.markerWaveform.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.refWaveform.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.trimWaveform.setPanRequestCallback((delta) => this.panView(delta));
+    this.markerWaveform.setPanRequestCallback((delta) => this.panView(delta));
+    this.refWaveform.setPanRequestCallback((delta) => this.panView(delta));
 
     const autoCanvas = document.getElementById('automation-canvas') as HTMLCanvasElement;
     this.automationEditor = new AutomationEditor(autoCanvas, {
@@ -150,7 +153,8 @@ class LowPassEditor {
         this.updateHomeLines();
       },
     });
-    this.automationEditor.setZoomRequestCallback((center, factor) => this.zoomAt(center, factor));
+    this.automationEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.automationEditor.setPanRequestCallback((delta) => this.panView(delta));
 
     const zoomSlider = document.getElementById('zoom-slider') as HTMLInputElement;
     const markerZoomSlider = document.getElementById('marker-zoom-slider') as HTMLInputElement;
@@ -367,14 +371,17 @@ class LowPassEditor {
     const axisDuration = this.getAxisDuration();
     if (axisDuration <= 0) return;
 
-    const center = Math.max(0, Math.min(axisDuration, this.playbackEngine.getHomeTime()));
+    const anchor = Math.max(0, Math.min(axisDuration, this.playbackEngine.getHomeTime()));
+    const viewRange = Math.max(1e-6, this.view.viewEnd - this.view.viewStart);
+    const frac = Math.max(0, Math.min(1, (anchor - this.view.viewStart) / viewRange));
     const viewWidth = axisDuration / Math.max(1, zoom);
-    let viewStart = center - viewWidth / 2;
-    let viewEnd = center + viewWidth / 2;
+    let viewStart = anchor - frac * viewWidth;
+    let viewEnd = viewStart + viewWidth;
     if (viewStart < 0) {
       viewStart = 0;
       viewEnd = viewWidth;
-    } else if (viewEnd > axisDuration) {
+    }
+    if (viewEnd > axisDuration) {
       viewEnd = axisDuration;
       viewStart = axisDuration - viewWidth;
     }
@@ -382,20 +389,22 @@ class LowPassEditor {
     this.syncView();
   }
 
-  private zoomAt(center: number, factor: number): void {
+  private zoomAt(center: number, factor: number, frac = 0.5): void {
     const axisDuration = this.getAxisDuration();
     if (axisDuration <= 0) return;
 
     const current = axisDuration / Math.max(1e-6, this.view.viewEnd - this.view.viewStart);
     const zoom = Math.max(1, Math.min(50, current * factor));
     const viewWidth = axisDuration / zoom;
-    const c = Math.max(0, Math.min(axisDuration, center));
-    let viewStart = c - viewWidth / 2;
-    let viewEnd = c + viewWidth / 2;
+    const anchor = Math.max(0, Math.min(axisDuration, center));
+    const f = Math.max(0, Math.min(1, frac));
+    let viewStart = anchor - f * viewWidth;
+    let viewEnd = viewStart + viewWidth;
     if (viewStart < 0) {
       viewStart = 0;
       viewEnd = viewWidth;
-    } else if (viewEnd > axisDuration) {
+    }
+    if (viewEnd > axisDuration) {
       viewEnd = axisDuration;
       viewStart = axisDuration - viewWidth;
     }
@@ -405,6 +414,28 @@ class LowPassEditor {
     const slider = document.getElementById(sliderId) as HTMLInputElement | null;
     if (slider) slider.value = String(zoom);
 
+    this.syncView();
+  }
+
+  private panView(delta: number): void {
+    const axisDuration = this.getAxisDuration();
+    if (axisDuration <= 0) return;
+    const viewRange = this.view.viewEnd - this.view.viewStart;
+    if (viewRange >= axisDuration) return;
+
+    // division by 1500 instead of 250 for a more natural scroll amount
+    const shift = delta * viewRange / 1500;
+    let viewStart = this.view.viewStart + shift;
+    let viewEnd = this.view.viewEnd + shift;
+    if (viewStart < 0) {
+      viewStart = 0;
+      viewEnd = viewRange;
+    }
+    if (viewEnd > axisDuration) {
+      viewEnd = axisDuration;
+      viewStart = axisDuration - viewRange;
+    }
+    this.view = { viewStart, viewEnd };
     this.syncView();
   }
 
