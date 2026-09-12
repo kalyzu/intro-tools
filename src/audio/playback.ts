@@ -1,8 +1,11 @@
 import type { AutomationPoint } from '../automation/model';
+import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain } from './filter';
 import { evaluateAutomation } from '../automation/model';
+import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
+import { interpolateVolume } from '../automation/volume-interpolation';
 
 export type PlaybackState = 'stopped' | 'playing' | 'paused';
 
@@ -17,12 +20,14 @@ export class PlaybackEngine {
   private source: AudioBufferSourceNode | null = null;
   private filters: BiquadFilterNode[] = [];
   private analyser: AnalyserNode | null = null;
+  private volumeGain: GainNode | null = null;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
   private startTime = 0;
   private pauseTime = 0;
   private homeTime = 0;
   private automationPoints: AutomationPoint[] = [];
+  private volumePoints: VolumePoint[] = [];
   private filterSlope: FilterSlope = 24;
   private filterEnabled = true;
   private callbacks: PlaybackCallbacks;
@@ -66,6 +71,13 @@ export class PlaybackEngine {
     this.automationPoints = points;
     if (this.state === 'playing') {
       this.rescheduleFilter();
+    }
+  }
+
+  setVolumePoints(points: VolumePoint[]): void {
+    this.volumePoints = points;
+    if (this.state === 'playing') {
+      this.rescheduleVolume();
     }
   }
 
@@ -130,6 +142,7 @@ export class PlaybackEngine {
     }
 
     this.scheduleFilterAutomation(clampedOffset);
+    this.scheduleVolumeAutomation(clampedOffset);
 
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
@@ -165,6 +178,7 @@ export class PlaybackEngine {
     }
 
     this.scheduleFilterAutomation(clampedOffset);
+    this.scheduleVolumeAutomation(clampedOffset);
 
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
@@ -232,9 +246,16 @@ export class PlaybackEngine {
     try {
       this.analyser?.disconnect();
     } catch {}
+    try {
+      this.volumeGain?.disconnect();
+    } catch {}
+    try {
+      this.volumeGain?.gain.cancelScheduledValues(0);
+    } catch {}
     this.source = null;
     this.filters = [];
     this.analyser = null;
+    this.volumeGain = null;
   }
 
   private buildGraph(ctx: AudioContext): void {
@@ -246,14 +267,18 @@ export class PlaybackEngine {
     analyser.fftSize = 2048;
     this.analyser = analyser;
 
+    const volumeGain = ctx.createGain();
+    this.volumeGain = volumeGain;
+
     if (this.filterEnabled) {
       this.filters = createFilterChain(ctx, this.filterSlope);
       source.connect(this.filters[0]);
-      this.filters[this.filters.length - 1].connect(analyser);
+      this.filters[this.filters.length - 1].connect(volumeGain);
     } else {
       this.filters = [];
-      source.connect(analyser);
+      source.connect(volumeGain);
     }
+    volumeGain.connect(analyser);
     analyser.connect(ctx.destination);
   }
 
@@ -284,6 +309,34 @@ export class PlaybackEngine {
     if (this.state !== 'playing' || !this.audioContext || this.filters.length === 0) return;
     const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
     this.scheduleFilterAutomation(bufTime);
+  }
+
+  private scheduleVolumeAutomation(bufStartTime: number): void {
+    if (!this.audioContext || !this.volumeGain) return;
+
+    const acNow = this.audioContext.currentTime;
+    const step = 0.005;
+    const rampDuration = 0.007;
+
+    const gainNode = this.volumeGain;
+    gainNode.gain.cancelScheduledValues(0);
+
+    const trimTime = bufStartTime - this.trimStart;
+    const initialGain = evaluateVolumeAutomation(this.volumePoints, Math.max(0, trimTime), interpolateVolume);
+    gainNode.gain.setValueAtTime(Math.max(0, Math.min(2, initialGain)), acNow);
+
+    for (let t = bufStartTime + step; t <= this.trimEnd; t += step) {
+      const trimT = t - this.trimStart;
+      const gain = evaluateVolumeAutomation(this.volumePoints, Math.max(0, trimT), interpolateVolume);
+      const rampEnd = acNow + (t - bufStartTime) + rampDuration;
+      gainNode.gain.linearRampToValueAtTime(Math.max(0, Math.min(2, gain)), rampEnd);
+    }
+  }
+
+  private rescheduleVolume(): void {
+    if (this.state !== 'playing' || !this.audioContext || !this.volumeGain) return;
+    const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
+    this.scheduleVolumeAutomation(bufTime);
   }
 
   private startUpdateLoop(): void {

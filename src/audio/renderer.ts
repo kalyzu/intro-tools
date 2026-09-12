@@ -1,8 +1,11 @@
 import type { AutomationPoint } from '../automation/model';
+import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain } from './filter';
 import { evaluateAutomation } from '../automation/model';
+import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
+import { interpolateVolume } from '../automation/volume-interpolation';
 
 export interface RenderProgress {
   progress: number;
@@ -11,6 +14,7 @@ export interface RenderProgress {
 export async function renderOffline(
   buffer: AudioBuffer,
   points: AutomationPoint[],
+  volumePoints: VolumePoint[] | null,
   slope: FilterSlope,
   trimStart: number,
   trimEnd: number,
@@ -29,8 +33,11 @@ export async function renderOffline(
   const filters = createFilterChain(offlineCtx, slope);
   const lastFilter = filters[filters.length - 1];
 
+  const volumeGain = offlineCtx.createGain();
+
   source.connect(filters[0]);
-  lastFilter.connect(offlineCtx.destination);
+  lastFilter.connect(volumeGain);
+  volumeGain.connect(offlineCtx.destination);
 
   const step = 0.005;
   const rampDuration = 0.007;
@@ -46,6 +53,18 @@ export async function renderOffline(
     for (const filter of filters) {
       filter.frequency.exponentialRampToValueAtTime(freq, t + rampDuration);
     }
+  }
+
+  // Volume automation (green graph) - linear gain 0-1
+  if (volumePoints && volumePoints.length > 0) {
+    const initialGain = evaluateVolumeAutomation(volumePoints, 0, interpolateVolume);
+    volumeGain.gain.setValueAtTime(Math.max(0, Math.min(2, initialGain)), 0);
+    for (let t = step; t <= trimDuration; t += step) {
+      const gain = evaluateVolumeAutomation(volumePoints, t, interpolateVolume);
+      volumeGain.gain.linearRampToValueAtTime(Math.max(0, Math.min(2, gain)), t + rampDuration);
+    }
+  } else {
+    volumeGain.gain.setValueAtTime(1, 0);
   }
 
   source.start(0, trimStart);

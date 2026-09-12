@@ -163,6 +163,13 @@ export class AutomationEditor {
     return this.selectedIndex;
   }
 
+  clearSelection(): void {
+    if (this.selectedIndex !== null) {
+      this.selectedIndex = null;
+      this.render();
+    }
+  }
+
   private getGraphBounds(): { x: number; y: number; w: number; h: number } {
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();

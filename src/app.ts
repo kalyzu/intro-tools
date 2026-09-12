@@ -1,11 +1,15 @@
 import type { AutomationPoint, Marker, ViewState } from './automation/model';
 import { sortPoints, clampTime } from './automation/model';
 import { createDefaultAutomation } from './automation/defaults';
+import type { VolumePoint } from './automation/volume-model';
+import { sortVolumePoints, clampVolumeTime } from './automation/volume-model';
+import { createDefaultVolumeAutomation } from './automation/volume-defaults';
 import { decodeAudioFile, trimAudioBuffer, type DecodedAudio } from './audio/decoder';
 import { PlaybackEngine, type PlaybackState } from './audio/playback';
 import { renderOffline } from './audio/renderer';
 import { WaveformRenderer } from './waveform/renderer';
 import { AutomationEditor } from './ui/automation-editor';
+import { VolumeEditor } from './ui/volume-editor';
 import type { FilterSlope } from './audio/filter';
 import moonIcon from '../img/moon.svg';
 import sunIcon from '../img/sun.svg';
@@ -19,15 +23,20 @@ class LowPassEditor {
 
   private automationPoints: AutomationPoint[] = [];
   private automationCustomized = false;
+  private volumePoints: VolumePoint[] = [];
+  private volumeCustomized = false;
   private playbackEngine: PlaybackEngine;
   private trimWaveform: WaveformRenderer | null = null;
   private markerWaveform: WaveformRenderer | null = null;
   private refWaveform: WaveformRenderer | null = null;
   private automationEditor: AutomationEditor | null = null;
+  private volumeEditor: VolumeEditor | null = null;
   private filterSlope: FilterSlope = 24;
 
   private undoStack: AutomationPoint[][] = [];
   private redoStack: AutomationPoint[][] = [];
+  private volumeUndoStack: VolumePoint[][] = [];
+  private volumeRedoStack: VolumePoint[][] = [];
   private maxUndoSize = 50;
 
   private trimStart = 0;
@@ -138,6 +147,8 @@ class LowPassEditor {
     this.refWaveform.setTrimVisible(false);
     this.refWaveform.setMarkersVisible(false);
     this.refWaveform.setSeekCallback((time) => {
+      this.automationEditor?.clearSelection();
+      this.volumeEditor?.clearSelection();
       this.playbackEngine.seek(this.clampTrimTime(time));
       this.updateHomeLines();
     });
@@ -152,7 +163,12 @@ class LowPassEditor {
     const autoCanvas = document.getElementById('automation-canvas') as HTMLCanvasElement;
     this.automationEditor = new AutomationEditor(autoCanvas, {
       onPointsChange: (points) => this.onPointsChange(points),
-      onPointSelect: () => {},
+      onPointSelect: () => {
+        // Any interaction on the filter graph clears the volume selection
+        // to prevent the "ghost" double-delete bug where a stale selection
+        // on the other graph is deleted together with the intended one.
+        this.volumeEditor?.clearSelection();
+      },
       onSeek: (time) => {
         this.playbackEngine.seek(this.clampTrimTime(time));
         this.updateHomeLines();
@@ -160,6 +176,20 @@ class LowPassEditor {
     });
     this.automationEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
     this.automationEditor.setPanRequestCallback((delta) => this.panView(delta));
+
+    const volumeCanvas = document.getElementById('volume-canvas') as HTMLCanvasElement;
+    this.volumeEditor = new VolumeEditor(volumeCanvas, {
+      onPointsChange: (points) => this.onVolumePointsChange(points),
+      onPointSelect: () => {
+        this.automationEditor?.clearSelection();
+      },
+      onSeek: (time) => {
+        this.playbackEngine.seek(this.clampTrimTime(time));
+        this.updateHomeLines();
+      },
+    });
+    this.volumeEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.volumeEditor.setPanRequestCallback((delta) => this.panView(delta));
 
     const zoomSlider = document.getElementById('zoom-slider') as HTMLInputElement;
     const markerZoomSlider = document.getElementById('marker-zoom-slider') as HTMLInputElement;
@@ -237,6 +267,7 @@ class LowPassEditor {
     this.markerWaveform?.render();
     this.refWaveform?.render();
     this.automationEditor?.render();
+    this.volumeEditor?.render();
   }
 
   private setupThemeToggle(): void {
@@ -282,11 +313,15 @@ class LowPassEditor {
 
       this.automationPoints = createDefaultAutomation(this.getTrimDuration());
       this.automationCustomized = false;
+      this.volumePoints = createDefaultVolumeAutomation(this.getTrimDuration());
+      this.volumeCustomized = false;
       this.pushUndo();
+      this.pushVolumeUndo();
 
       this.playbackEngine.setBuffer(this.decodedAudio.buffer);
       this.playbackEngine.setTrim(this.trimStart, this.trimEnd);
       this.playbackEngine.setAutomationPoints(this.automationPoints);
+      this.playbackEngine.setVolumePoints(this.volumePoints);
       this.playbackEngine.setFilterSlope(this.filterSlope);
 
       this.trimWaveform!.setBuffer(this.decodedAudio.buffer);
@@ -295,6 +330,8 @@ class LowPassEditor {
 
       this.automationEditor!.setDuration(this.getTrimDuration());
       this.automationEditor!.setPoints(this.automationPoints);
+      this.volumeEditor!.setDuration(this.getTrimDuration());
+      this.volumeEditor!.setPoints(this.volumePoints);
 
       this.mode = 'trim';
       this.showModeScreen();
@@ -374,6 +411,7 @@ class LowPassEditor {
     }
 
     this.automationEditor?.setActive(isFilter);
+    this.volumeEditor?.setActive(isFilter);
     this.playbackEngine.setFilterEnabled(!isTrim);
 
     (document.getElementById('zoom-slider') as HTMLInputElement).value = '1';
@@ -396,6 +434,7 @@ class LowPassEditor {
     } else {
       this.refWaveform?.setView(this.view);
       this.automationEditor?.setView(this.view);
+      this.volumeEditor?.setView(this.view);
     }
   }
 
@@ -405,6 +444,7 @@ class LowPassEditor {
     this.markerWaveform?.setHomeTime(home);
     this.refWaveform?.setHomeTime(home);
     this.automationEditor?.setHomeTime(home);
+    this.volumeEditor?.setHomeTime(home);
   }
 
   private updateZoom(zoom: number): void {
@@ -498,9 +538,11 @@ class LowPassEditor {
     }
 
     this.ensureAutomationFits(trimmedDuration);
+    this.ensureVolumeFits(trimmedDuration);
     this.playbackEngine.setBuffer(this.trimmedBuffer);
     this.playbackEngine.setTrim(0, trimmedDuration);
     this.playbackEngine.setAutomationPoints(this.automationPoints);
+    this.playbackEngine.setVolumePoints(this.volumePoints);
     this.playbackEngine.setFilterSlope(this.filterSlope);
 
     this.refWaveform!.setBuffer(this.trimmedBuffer);
@@ -511,6 +553,8 @@ class LowPassEditor {
 
     this.automationEditor!.setDuration(trimmedDuration);
     this.automationEditor!.setPoints(this.automationPoints);
+    this.volumeEditor!.setDuration(trimmedDuration);
+    this.volumeEditor!.setPoints(this.volumePoints);
 
     this.mode = 'filter';
     this.showModeScreen();
@@ -562,6 +606,20 @@ class LowPassEditor {
     this.pushUndo();
   }
 
+  private ensureVolumeFits(duration: number): void {
+    const deduped = new Map<number, VolumePoint>();
+    for (const p of this.volumePoints) {
+      const clamped = { ...p, time: clampVolumeTime(p.time, duration) };
+      deduped.set(clamped.time, clamped);
+    }
+    let points = sortVolumePoints([...deduped.values()]);
+    if (points.length < 2) {
+      points = createDefaultVolumeAutomation(duration);
+    }
+    this.volumePoints = points;
+    this.pushVolumeUndo();
+  }
+
   private onTrimChange(start: number, end: number): void {
     this.trimStart = start;
     this.trimEnd = end;
@@ -573,7 +631,13 @@ class LowPassEditor {
       this.playbackEngine.setAutomationPoints(this.automationPoints);
       this.automationEditor?.setPoints(this.automationPoints);
     }
+    if (!this.volumeCustomized) {
+      this.volumePoints = createDefaultVolumeAutomation(duration);
+      this.playbackEngine.setVolumePoints(this.volumePoints);
+      this.volumeEditor?.setPoints(this.volumePoints);
+    }
     this.automationEditor?.setDuration(duration);
+    this.volumeEditor?.setDuration(duration);
     this.updateTrimDisplay();
   }
 
@@ -634,6 +698,13 @@ class LowPassEditor {
     this.pushUndo();
   }
 
+  private onVolumePointsChange(points: VolumePoint[]): void {
+    this.volumePoints = sortVolumePoints(points);
+    this.volumeCustomized = true;
+    this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.pushVolumeUndo();
+  }
+
   private onTimeUpdate(time: number): void {
     if (this.mode === 'trim') {
       this.trimWaveform?.setPlayhead(time + this.trimStart);
@@ -642,6 +713,7 @@ class LowPassEditor {
     } else {
       this.refWaveform?.setPlayhead(time);
       this.automationEditor?.setPlayhead(time);
+      this.volumeEditor?.setPlayhead(time);
     }
 
     const trimDisplay = document.getElementById('trim-time-display');
@@ -671,6 +743,7 @@ class LowPassEditor {
     this.markerWaveform?.setPlayhead(home);
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
+    this.volumeEditor?.setPlayhead(home);
   }
 
   private togglePlayback(): void {
@@ -692,6 +765,7 @@ class LowPassEditor {
     this.markerWaveform?.setPlayhead(home);
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
+    this.volumeEditor?.setPlayhead(home);
   }
 
   private async exportAudio(): Promise<void> {
@@ -707,7 +781,7 @@ class LowPassEditor {
     btn.disabled = true;
 
     try {
-      const blob = await renderOffline(buffer, this.automationPoints, this.filterSlope, start, end);
+      const blob = await renderOffline(buffer, this.automationPoints, this.volumePoints, this.filterSlope, start, end);
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -752,8 +826,35 @@ class LowPassEditor {
     this.redoStack = [];
   }
 
+  private pushVolumeUndo(): void {
+    this.volumeUndoStack.push(this.volumePoints.map(p => ({ ...p })));
+    if (this.volumeUndoStack.length > this.maxUndoSize) {
+      this.volumeUndoStack.shift();
+    }
+    this.volumeRedoStack = [];
+  }
+
   private undo(): void {
-    if (this.undoStack.length <= 1) return;
+    // Undo volume if its editor is focused? For simplicity, undo both stacks together
+    // Try volume first if volume editor has selection, otherwise filter
+    const volSel = this.volumeEditor?.getSelectedIndex();
+    if (volSel !== null && volSel !== undefined && this.volumeUndoStack.length > 1) {
+      const current = this.volumeUndoStack.pop()!;
+      this.volumeRedoStack.push(current);
+      const prev = this.volumeUndoStack[this.volumeUndoStack.length - 1];
+      this.restoreVolumeState(prev);
+      return;
+    }
+    if (this.undoStack.length <= 1) {
+      // fallback to volume if filter has no undo
+      if (this.volumeUndoStack.length > 1) {
+        const current = this.volumeUndoStack.pop()!;
+        this.volumeRedoStack.push(current);
+        const prev = this.volumeUndoStack[this.volumeUndoStack.length - 1];
+        this.restoreVolumeState(prev);
+      }
+      return;
+    }
     const current = this.undoStack.pop()!;
     this.redoStack.push(current);
     const prev = this.undoStack[this.undoStack.length - 1];
@@ -761,7 +862,21 @@ class LowPassEditor {
   }
 
   private redo(): void {
-    if (this.redoStack.length === 0) return;
+    const volSel = this.volumeEditor?.getSelectedIndex();
+    if (volSel !== null && volSel !== undefined && this.volumeRedoStack.length > 0) {
+      const next = this.volumeRedoStack.pop()!;
+      this.volumeUndoStack.push(next);
+      this.restoreVolumeState(next);
+      return;
+    }
+    if (this.redoStack.length === 0) {
+      if (this.volumeRedoStack.length > 0) {
+        const next = this.volumeRedoStack.pop()!;
+        this.volumeUndoStack.push(next);
+        this.restoreVolumeState(next);
+      }
+      return;
+    }
     const next = this.redoStack.pop()!;
     this.undoStack.push(next);
     this.restoreState(next);
@@ -771,6 +886,12 @@ class LowPassEditor {
     this.automationPoints = points.map(p => ({ ...p }));
     this.playbackEngine.setAutomationPoints(this.automationPoints);
     this.automationEditor!.setPoints(this.automationPoints);
+  }
+
+  private restoreVolumeState(points: VolumePoint[]): void {
+    this.volumePoints = points.map(p => ({ ...p }));
+    this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.volumeEditor!.setPoints(this.volumePoints);
   }
 }
 
