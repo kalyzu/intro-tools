@@ -175,6 +175,10 @@ export class WaveformRenderer {
     return this.view.viewStart + ((x - this.paddingLeft * dpr) / graphWidth) * (this.view.viewEnd - this.view.viewStart);
   }
 
+  private cssVar(name: string, fallback: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+
   private extractPeaks(buffer: AudioBuffer, resolution: number): Float32Array {
     const channelData = buffer.getChannelData(0);
     const peaks = new Float32Array(resolution);
@@ -406,7 +410,7 @@ export class WaveformRenderer {
     if (this.homeTime < this.view.viewStart || this.homeTime > this.view.viewEnd) return;
     const x = this.timeToX(this.homeTime);
     const ctx = this.ctx;
-    ctx.strokeStyle = 'rgba(224, 236, 247, 0.35)';
+    ctx.strokeStyle = 'rgba(79, 170, 247, 0.55)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(x, 0);
@@ -435,7 +439,7 @@ export class WaveformRenderer {
     const viewDuration = this.view.viewEnd - this.view.viewStart;
     const peaksPerSecond = this.peaks.length / this.buffer.duration;
 
-    ctx.fillStyle = '#2a3a4a';
+    ctx.fillStyle = this.cssVar('--waveform-fill', '#2a3a4a');
     for (let px = 0; px < graphWidth; px++) {
       const t = this.view.viewStart + (px / graphWidth) * viewDuration;
       const peakIndex = Math.max(0, Math.min(this.peaks.length - 1, Math.floor(t * peaksPerSecond)));

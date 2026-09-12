@@ -7,6 +7,8 @@ import { renderOffline } from './audio/renderer';
 import { WaveformRenderer } from './waveform/renderer';
 import { AutomationEditor } from './ui/automation-editor';
 import type { FilterSlope } from './audio/filter';
+import moonIcon from '../img/moon.svg';
+import sunIcon from '../img/sun.svg';
 
 type Mode = 'trim' | 'markers' | 'filter';
 
@@ -51,6 +53,9 @@ class LowPassEditor {
     const dropZone = document.getElementById('drop-zone')!;
     const fileInput = document.getElementById('file-input') as HTMLInputElement;
     const openBtn = document.getElementById('open-btn')!;
+
+    this.setupThemeToggle();
+    this.setupInfoPopup();
 
     openBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => {
@@ -216,6 +221,41 @@ class LowPassEditor {
         e.preventDefault();
         this.deleteMarker(this.selectedMarkerId);
       }
+    });
+  }
+
+  private getTheme(): 'dark' | 'light' {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  }
+
+  private setTheme(theme: 'dark' | 'light'): void {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('lowpass-theme', theme); } catch {}
+    (document.getElementById('theme-icon') as HTMLImageElement).src =
+      theme === 'dark' ? moonIcon : sunIcon;
+    this.trimWaveform?.render();
+    this.markerWaveform?.render();
+    this.refWaveform?.render();
+    this.automationEditor?.render();
+  }
+
+  private setupThemeToggle(): void {
+    this.setTheme(this.getTheme());
+    document.getElementById('theme-toggle-btn')!.addEventListener('click', () => {
+      this.setTheme(this.getTheme() === 'light' ? 'dark' : 'light');
+    });
+  }
+
+  private setupInfoPopup(): void {
+    const overlay = document.getElementById('info-overlay')!;
+    const open = () => { overlay.hidden = false; };
+    const close = () => { overlay.hidden = true; };
+
+    document.getElementById('info-btn')!.addEventListener('click', open);
+    document.getElementById('info-close-btn')!.addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !overlay.hidden) close();
     });
   }
 

@@ -202,6 +202,10 @@ export class AutomationEditor {
     return Math.exp(logFreq);
   }
 
+  private cssVar(name: string, fallback: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+
   private getCanvasCoords(e: MouseEvent): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -539,7 +543,7 @@ export class AutomationEditor {
     if (this.homeTime < this.view.viewStart || this.homeTime > this.view.viewEnd) return;
     const x = this.timeToX(this.homeTime);
     const ctx = this.ctx;
-    ctx.strokeStyle = 'rgba(224, 236, 247, 0.35)';
+    ctx.strokeStyle = 'rgba(79, 170, 247, 0.55)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(x, b.y);
@@ -550,7 +554,7 @@ export class AutomationEditor {
   private drawGrid(b: { x: number; y: number; w: number; h: number }): void {
     const ctx = this.ctx;
 
-    ctx.strokeStyle = '#1a2a3a';
+    ctx.strokeStyle = this.cssVar('--grid-line', '#1a2a3a');
     ctx.lineWidth = 1;
 
     for (let i = 0; i < FREQ_LABELS.length; i++) {
@@ -561,7 +565,7 @@ export class AutomationEditor {
       ctx.lineTo(b.x + b.w, y);
       ctx.stroke();
 
-      ctx.fillStyle = '#5a7a9a';
+      ctx.fillStyle = this.cssVar('--grid-label', '#5a7a9a');
       ctx.font = `${11}px "SF Mono", "Fira Code", monospace`;
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -584,14 +588,14 @@ export class AutomationEditor {
       ctx.lineTo(x, b.y + b.h);
       ctx.stroke();
 
-      ctx.fillStyle = '#5a7a9a';
+      ctx.fillStyle = this.cssVar('--grid-label', '#5a7a9a');
       ctx.font = `${11}px "SF Mono", "Fira Code", monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(t >= 10 ? t.toFixed(1) : t.toFixed(2) + 's', x, b.y + b.h + 8);
     }
 
-    ctx.strokeStyle = '#2a4a5a';
+    ctx.strokeStyle = this.cssVar('--grid-border', '#2a4a5a');
     ctx.lineWidth = 1.5;
     ctx.strokeRect(b.x, b.y, b.w, b.h);
   }

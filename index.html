@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Low-Pass Editor</title>
   <link rel="stylesheet" href="/src/style.css">
+  <script>
+    try {
+      document.documentElement.setAttribute('data-theme', localStorage.getItem('lowpass-theme') || 'dark');
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  </script>
 </head>
 <body>
   <div id="app">
@@ -24,6 +31,12 @@
           <span id="file-name" class="file-name"></span>
           <span id="trim-duration" class="trim-duration"></span>
         </div>
+        <button id="theme-toggle-btn" class="btn btn-icon" title="Toggle light / dark mode" aria-label="Toggle light / dark mode">
+          <img id="theme-icon" src="" alt="" width="16" height="16">
+        </button>
+        <button id="info-btn" class="btn btn-icon" title="About this project" aria-label="About this project">
+          <span class="icon-info" aria-hidden="true">i</span>
+        </button>
       </div>
     </header>
 
@@ -177,6 +190,29 @@
             <button id="marker-stop-btn" class="btn btn-transport">&#9632; Stop</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="info-overlay" class="info-overlay" hidden>
+    <div class="info-popup" role="dialog" aria-modal="true" aria-labelledby="info-popup-title">
+      <div class="info-popup-header">
+        <h2 id="info-popup-title" class="info-popup-title">About Low-Pass Editor</h2>
+        <button id="info-close-btn" class="btn btn-icon" aria-label="Close info popup">&#10005;</button>
+      </div>
+      <div class="info-popup-body">
+        <p class="info-text">
+          Low-Pass Editor is a small in-browser tool for trimming a clip, shaping the low-pass cutoff over time, and marking beats for export. It runs entirely locally — your audio never leaves your machine.
+        </p>
+        <p class="info-text">
+          <strong>How it works:</strong> import an audio file, trim the region you want, shape the cutoff envelope (drag points, bend the curve, right-click a point to toggle linear), place beat markers, then export the filtered clip and the timestamp list.
+        </p>
+        <p class="info-text">
+          Source code and issues live on <a href="#" class="info-link">the project repository</a>.
+        </p>
+        <p class="info-text">
+          <strong>Controls:</strong> <kbd>Space</kbd> play / pause &middot; <kbd>A</kbd> place a marker &middot; <kbd>Del</kbd> remove the selected marker &middot; <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> undo / redo &middot; scroll to zoom &middot; <kbd>Shift</kbd>+scroll to pan.
+        </p>
       </div>
     </div>
   </div>
