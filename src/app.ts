@@ -680,16 +680,33 @@ class LowPassEditor {
 
   private updateMarkerDisplay(): void {
     const el = document.getElementById('marker-display') as HTMLElement;
-    if (!el) return;
-    if (this.selectedMarkerId !== null) {
-      const marker = this.markers.find(m => m.id === this.selectedMarkerId);
-      if (marker) {
-        el.textContent = `Marker: ${marker.time.toFixed(2)}s`;
-        el.hidden = false;
-        return;
+    if (el) {
+      if (this.selectedMarkerId !== null) {
+        const marker = this.markers.find(m => m.id === this.selectedMarkerId);
+        if (marker) {
+          el.textContent = `Marker: ${marker.time.toFixed(2)}s`;
+          el.hidden = false;
+        } else {
+          el.hidden = true;
+        }
+      } else {
+        el.hidden = true;
       }
     }
-    el.hidden = true;
+    // Keep beat display in sync when idle (not playing)
+    if (this.playbackEngine.getState() !== 'playing') {
+      const beatLabel = document.getElementById('beat-display-label');
+      const beatLight = document.getElementById('beat-display-light');
+      if (beatLabel && beatLight) {
+        if (this.selectedMarkerId !== null) {
+          const sel = this.markers.find(m => m.id === this.selectedMarkerId);
+          beatLabel.textContent = sel ? `♪ ${sel.time.toFixed(2)}s` : '—';
+        } else {
+          beatLabel.textContent = '—';
+          beatLight.classList.remove('active');
+        }
+      }
+    }
   }
 
   private onPointsChange(points: AutomationPoint[]): void {
@@ -729,6 +746,50 @@ class LowPassEditor {
     if (filterDisplay) {
       filterDisplay.textContent = `${time.toFixed(2)}s`;
     }
+
+    this.updateBeatDisplay(time);
+  }
+
+  private updateBeatDisplay(time: number): void {
+    const light = document.getElementById('beat-display-light');
+    const label = document.getElementById('beat-display-label');
+    if (!light || !label) return;
+
+    if (this.markers.length === 0) {
+      label.textContent = '—';
+      light.classList.remove('active');
+      return;
+    }
+
+    // Immediate on/off, no debounce or timeout — on when playhead is at a marker
+    const threshold = 0.03; // 30ms : tight enough for “now”, wide enough for 16ms update
+    let hit: Marker | null = null;
+    for (const m of this.markers) {
+      if (Math.abs(m.time - time) < threshold) {
+        hit = m;
+        break;
+      }
+    }
+
+    if (hit) {
+      light.classList.add('active');
+      label.textContent = `♪ ${hit.time.toFixed(2)}s`;
+    } else {
+      light.classList.remove('active');
+      if (this.playbackEngine.getState() !== 'playing') {
+        const sel = this.selectedMarkerId !== null ? this.markers.find(m => m.id === this.selectedMarkerId) : null;
+        label.textContent = sel ? `♪ ${sel.time.toFixed(2)}s` : '—';
+      } else {
+        label.textContent = '—';
+      }
+    }
+  }
+
+  private clearBeatDisplay(): void {
+    const light = document.getElementById('beat-display-light');
+    const label = document.getElementById('beat-display-label');
+    if (light) light.classList.remove('active');
+    if (label) label.textContent = '—';
   }
 
   private onStateChange(state: PlaybackState): void {
@@ -745,6 +806,13 @@ class LowPassEditor {
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
     this.volumeEditor?.setPlayhead(home);
+    this.clearBeatDisplay();
+    // Show selected marker after stop if any
+    if (this.selectedMarkerId !== null) {
+      const sel = this.markers.find(m => m.id === this.selectedMarkerId);
+      const label = document.getElementById('beat-display-label');
+      if (sel && label) label.textContent = `♪ ${sel.time.toFixed(2)}s`;
+    }
   }
 
   private togglePlayback(): void {
@@ -767,6 +835,12 @@ class LowPassEditor {
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
     this.volumeEditor?.setPlayhead(home);
+    this.clearBeatDisplay();
+    if (this.selectedMarkerId !== null) {
+      const sel = this.markers.find(m => m.id === this.selectedMarkerId);
+      const label = document.getElementById('beat-display-label');
+      if (sel && label) label.textContent = `♪ ${sel.time.toFixed(2)}s`;
+    }
   }
 
   private async exportAudio(): Promise<void> {

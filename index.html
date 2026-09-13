@@ -142,33 +142,43 @@
     <div id="screen-markers" class="screen" hidden>
       <div class="editor-area">
         <div class="export-panel">
-          <div class="export-panel-header">
-            <span class="section-label">Export</span>
-            <span class="export-hint">The filtered clip and marker timestamps. Markers are written to a separate <code>.txt</code> file and are not embedded in the audio.</span>
-          </div>
+          <div class="export-panel-left">
+            <div class="export-panel-header">
+              <span class="section-label">Export</span>
+              <span class="export-hint">The filtered clip and marker timestamps. Markers are written to a separate <code>.txt</code> file and are not embedded in the audio.</span>
+            </div>
 
-          <div class="export-info-grid">
-            <div class="info-item">
-              <span class="info-label">Duration</span>
-              <span id="export-duration" class="info-value">&mdash;</span>
+            <div class="export-info-grid">
+              <div class="info-item">
+                <span class="info-label">Duration</span>
+                <span id="export-duration" class="info-value">&mdash;</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Sample rate</span>
+                <span id="export-samplerate" class="info-value">&mdash;</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Channels</span>
+                <span id="export-channels" class="info-value">&mdash;</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Low-pass slope</span>
+                <span id="export-slope" class="info-value">&mdash;</span>
+              </div>
             </div>
-            <div class="info-item">
-              <span class="info-label">Sample rate</span>
-              <span id="export-samplerate" class="info-value">&mdash;</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Channels</span>
-              <span id="export-channels" class="info-value">&mdash;</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Low-pass slope</span>
-              <span id="export-slope" class="info-value">&mdash;</span>
+
+            <div class="export-actions">
+              <button id="export-audio-btn" class="btn btn-export">Export Audio</button>
+              <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled>Export Timestamps</button>
             </div>
           </div>
-
-          <div class="export-actions">
-            <button id="export-audio-btn" class="btn btn-export">Export Audio</button>
-            <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled>Export Timestamps</button>
+          <div id="beat-display" class="beat-display">
+            <div class="beat-display-header">
+              <span class="beat-display-title">Beat Indicator</span>
+              <span class="beat-display-desc">Flashes when playhead hits a marker — visual metronome for marker sync</span>
+            </div>
+            <div id="beat-display-light" class="beat-display-light" aria-label="Beat indicator"></div>
+            <div id="beat-display-label" class="beat-display-label">—</div>
           </div>
         </div>
 
