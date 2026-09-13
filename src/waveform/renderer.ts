@@ -6,7 +6,6 @@ export class WaveformRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private buffer: AudioBuffer | null = null;
-  private peaks: Float32Array | null = null;
   private playheadTime = 0;
   private homeTime = 0;
   private view: ViewState = { viewStart: 0, viewEnd: 10 };
@@ -24,6 +23,15 @@ export class WaveformRenderer {
   private trimVisible = true;
   private markersVisible = true;
   private showBorder = false;
+
+  // Audacity-style cached peak envelope (min/max per block)
+  private peakCache: {
+    blockSize: number;
+    numBlocks: number;
+    channelMins: Float32Array[];
+    channelMaxs: Float32Array[];
+  } | null = null;
+  private static readonly BASE_BLOCK_SIZE = 256;
 
   private onTrimChange: ((start: number, end: number) => void) | null = null;
   private onMarkerAdd: ((time: number) => void) | null = null;
@@ -98,8 +106,118 @@ export class WaveformRenderer {
 
   setBuffer(buffer: AudioBuffer): void {
     this.buffer = buffer;
-    this.peaks = this.extractPeaks(buffer, 4000);
+    this.buildPeakCache();
     this.render();
+  }
+
+  private buildPeakCache(): void {
+    if (!this.buffer) {
+      this.peakCache = null;
+      return;
+    }
+    const blockSize = WaveformRenderer.BASE_BLOCK_SIZE;
+    const channels = this.buffer.numberOfChannels;
+    const length = this.buffer.length;
+    const numBlocks = Math.ceil(length / blockSize);
+    const channelMins: Float32Array[] = [];
+    const channelMaxs: Float32Array[] = [];
+    for (let ch = 0; ch < channels; ch++) {
+      const data = this.buffer.getChannelData(ch);
+      const mins = new Float32Array(numBlocks);
+      const maxs = new Float32Array(numBlocks);
+      for (let b = 0; b < numBlocks; b++) {
+        const start = b * blockSize;
+        const end = Math.min(start + blockSize, length);
+        let min = Infinity;
+        let max = -Infinity;
+        for (let i = start; i < end; i++) {
+          const v = data[i];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+        if (min === Infinity) min = 0;
+        if (max === -Infinity) max = 0;
+        mins[b] = min;
+        maxs[b] = max;
+      }
+      channelMins.push(mins);
+      channelMaxs.push(maxs);
+    }
+    this.peakCache = { blockSize, numBlocks, channelMins, channelMaxs };
+  }
+
+  private getPeakForRange(s0: number, s1: number): { min: number; max: number } {
+    if (!this.buffer || !this.peakCache) return { min: 0, max: 0 };
+    const { blockSize, channelMins, channelMaxs } = this.peakCache;
+    const bufferLength = this.buffer.length;
+    s0 = Math.max(0, Math.min(bufferLength, s0));
+    s1 = Math.max(0, Math.min(bufferLength, s1));
+    if (s1 <= s0) s1 = Math.min(bufferLength, s0 + 1);
+    const rangeLen = s1 - s0;
+    if (rangeLen <= blockSize * 2) {
+      let min = Infinity;
+      let max = -Infinity;
+      for (let ch = 0; ch < this.buffer.numberOfChannels; ch++) {
+        const data = this.buffer.getChannelData(ch);
+        for (let i = s0; i < s1; i++) {
+          const v = data[i];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+      }
+      if (min === Infinity) min = 0;
+      if (max === -Infinity) max = 0;
+      return { min, max };
+    }
+    const startBlock = Math.floor(s0 / blockSize);
+    const endBlock = Math.ceil(s1 / blockSize);
+    let min = Infinity;
+    let max = -Infinity;
+    for (let ch = 0; ch < channelMins.length; ch++) {
+      const mins = channelMins[ch];
+      const maxs = channelMaxs[ch];
+      const firstBlockStart = startBlock * blockSize;
+      const firstBlockEnd = Math.min((startBlock + 1) * blockSize, bufferLength);
+      if (s0 > firstBlockStart && s0 < firstBlockEnd) {
+        const data = this.buffer.getChannelData(ch);
+        for (let i = s0; i < Math.min(s1, firstBlockEnd); i++) {
+          const v = data[i];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+      } else if (s0 <= firstBlockStart) {
+        if (startBlock < mins.length) {
+          if (mins[startBlock] < min) min = mins[startBlock];
+          if (maxs[startBlock] > max) max = maxs[startBlock];
+        }
+      }
+      for (let b = startBlock + 1; b < endBlock - 1; b++) {
+        if (b < 0 || b >= mins.length) continue;
+        if (mins[b] < min) min = mins[b];
+        if (maxs[b] > max) max = maxs[b];
+      }
+      if (endBlock - 1 > startBlock) {
+        const lastBlock = endBlock - 1;
+        const lastBlockStart = lastBlock * blockSize;
+        const lastBlockEnd = Math.min((lastBlock + 1) * blockSize, bufferLength);
+        if (s1 > lastBlockStart && s1 < lastBlockEnd) {
+          const data = this.buffer.getChannelData(ch);
+          for (let i = Math.max(s0, lastBlockStart); i < s1; i++) {
+            const v = data[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+          }
+        } else if (s1 >= lastBlockEnd) {
+          if (lastBlock < mins.length) {
+            if (mins[lastBlock] < min) min = mins[lastBlock];
+            if (maxs[lastBlock] > max) max = maxs[lastBlock];
+          }
+        }
+      }
+    }
+    if (min === Infinity) min = 0;
+    if (max === -Infinity) max = 0;
+    return { min, max };
   }
 
   setView(view: ViewState): void {
@@ -183,25 +301,6 @@ export class WaveformRenderer {
 
   private cssVar(name: string, fallback: string): string {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-  }
-
-  private extractPeaks(buffer: AudioBuffer, resolution: number): Float32Array {
-    const channelData = buffer.getChannelData(0);
-    const peaks = new Float32Array(resolution);
-    const samplesPerPeak = Math.floor(channelData.length / resolution);
-
-    for (let i = 0; i < resolution; i++) {
-      let max = 0;
-      const start = i * samplesPerPeak;
-      const end = Math.min(start + samplesPerPeak, channelData.length);
-      for (let j = start; j < end; j++) {
-        const abs = Math.abs(channelData[j]);
-        if (abs > max) max = abs;
-      }
-      peaks[i] = max;
-    }
-
-    return peaks;
   }
 
   private findTrimHandleAt(coords: { x: number; y: number }): 'start' | 'end' | null {
@@ -384,7 +483,7 @@ export class WaveformRenderer {
     const h = this.canvas.height;
     this.ctx.clearRect(0, 0, w, h);
 
-    if (!this.peaks) return;
+    if (!this.buffer) return;
 
     if (this.showBorder) {
       this.drawBorder(w, h);
@@ -462,22 +561,33 @@ export class WaveformRenderer {
   }
 
   private drawWaveform(w: number, h: number): void {
-    if (!this.peaks || !this.buffer) return;
+    if (!this.buffer) return;
     const dpr = window.devicePixelRatio || 1;
     const ctx = this.ctx;
-    const centerY = h / 2;
     const graphWidth = w - (this.paddingLeft + this.paddingRight) * dpr;
     const startX = this.paddingLeft * dpr;
+    if (graphWidth <= 0) return;
 
+    const sampleRate = this.buffer.sampleRate;
     const viewDuration = this.view.viewEnd - this.view.viewStart;
-    const peaksPerSecond = this.peaks.length / this.buffer.duration;
+    const centerY = h / 2;
+    const amplitudeScale = centerY * 0.9;
 
     ctx.fillStyle = this.cssVar('--waveform-fill', '#2a3a4a');
+
+    // Audacity-style: per-pixel min/max envelope, not averaged
     for (let px = 0; px < graphWidth; px++) {
-      const t = this.view.viewStart + (px / graphWidth) * viewDuration;
-      const peakIndex = Math.max(0, Math.min(this.peaks.length - 1, Math.floor(t * peaksPerSecond)));
-      const amp = this.peaks[peakIndex] * centerY * 0.9;
-      ctx.fillRect(startX + px, centerY - amp, 1, amp * 2);
+      const t0 = this.view.viewStart + (px / graphWidth) * viewDuration;
+      const t1 = this.view.viewStart + ((px + 1) / graphWidth) * viewDuration;
+      const s0 = Math.floor(t0 * sampleRate);
+      const s1 = Math.ceil(t1 * sampleRate);
+      const { min, max } = this.getPeakForRange(s0, s1);
+      if (min === 0 && max === 0) continue;
+      const yMin = centerY + min * amplitudeScale;
+      const yMax = centerY + max * amplitudeScale;
+      const y = Math.min(yMin, yMax);
+      const height = Math.max(1, Math.abs(yMax - yMin));
+      ctx.fillRect(startX + px, y, 1, height);
     }
   }
 

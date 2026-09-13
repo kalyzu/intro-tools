@@ -34,9 +34,9 @@ export async function renderOffline(
   const lastFilter = filters[filters.length - 1];
 
   const volumeGain = offlineCtx.createGain();
-  // Static headroom -1 dBFS (0.891) for filter overshoot, matches playback
+  // Static headroom ~-2.5 dBFS (0.75) matches playback, more aggressive to clean 48 dB
   const outputGain = offlineCtx.createGain();
-  outputGain.gain.value = 0.8912509381337456; // 10^(-1/20)
+  outputGain.gain.value = 0.75; // -2.5 dB
 
   source.connect(filters[0]);
   lastFilter.connect(volumeGain);

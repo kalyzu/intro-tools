@@ -616,14 +616,22 @@ export class AutomationEditor {
       const pA = this.points[i];
       const pB = this.points[i + 1];
 
+      // Only draw the visible portion to avoid huge step counts when zoomed in
+      const segStart = Math.max(pA.time, this.view.viewStart);
+      const segEnd = Math.min(pB.time, this.view.viewEnd);
+      if (segStart >= segEnd) continue;
+
+      const xStart = this.timeToX(segStart);
+      const xEnd = this.timeToX(segEnd);
+      const steps = Math.max(20, Math.abs(xEnd - xStart) / 2);
+
       ctx.strokeStyle = '#4fc3f7';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
 
-      const steps = Math.max(50, (this.timeToX(pB.time) - this.timeToX(pA.time)) / 2);
       for (let s = 0; s <= steps; s++) {
         const t = s / steps;
-        const time = pA.time + t * (pB.time - pA.time);
+        const time = segStart + t * (segEnd - segStart);
         const freq = evaluateAutomation(this.points, time, interpolate);
         const x = this.timeToX(time);
         const y = this.freqToY(freq);

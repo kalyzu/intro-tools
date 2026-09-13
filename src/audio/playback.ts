@@ -275,10 +275,11 @@ export class PlaybackEngine {
     const volumeGain = ctx.createGain();
     this.volumeGain = volumeGain;
 
-    // Static headroom: -1 dBFS (0.891) to prevent filter overshoot (1.059/1.078) from hard-clipping.
+    // Static headroom: ~-2.5 dBFS (0.75) to prevent filter overshoot (1.059/1.078) from hard-clipping.
+    // More aggressive than -1dB to clean 24/48 dB (12 was already clean at -1dB, 48 peaked at 0.96).
     // Consistent gain for entire signal, no limiter/compressor, applied to playback and offline.
     const outputGain = ctx.createGain();
-    outputGain.gain.value = 0.8912509381337456; // 10^(-1/20)
+    outputGain.gain.value = 0.75; // -2.5 dB ≈ 0.75, approx -2 to -3 dB range
     this.outputGain = outputGain;
 
     if (this.filterEnabled) {
