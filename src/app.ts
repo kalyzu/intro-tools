@@ -146,6 +146,7 @@ class LowPassEditor {
     this.refWaveform = new WaveformRenderer(refCanvas);
     this.refWaveform.setTrimVisible(false);
     this.refWaveform.setMarkersVisible(false);
+    this.refWaveform.setShowBorder(true);
     this.refWaveform.setSeekCallback((time) => {
       this.automationEditor?.clearSelection();
       this.volumeEditor?.clearSelection();

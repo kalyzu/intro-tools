@@ -21,6 +21,7 @@ export class PlaybackEngine {
   private filters: BiquadFilterNode[] = [];
   private analyser: AnalyserNode | null = null;
   private volumeGain: GainNode | null = null;
+  private outputGain: GainNode | null = null;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
   private startTime = 0;
@@ -252,10 +253,14 @@ export class PlaybackEngine {
     try {
       this.volumeGain?.gain.cancelScheduledValues(0);
     } catch {}
+    try {
+      this.outputGain?.disconnect();
+    } catch {}
     this.source = null;
     this.filters = [];
     this.analyser = null;
     this.volumeGain = null;
+    this.outputGain = null;
   }
 
   private buildGraph(ctx: AudioContext): void {
@@ -270,6 +275,12 @@ export class PlaybackEngine {
     const volumeGain = ctx.createGain();
     this.volumeGain = volumeGain;
 
+    // Static headroom: -1 dBFS (0.891) to prevent filter overshoot (1.059/1.078) from hard-clipping.
+    // Consistent gain for entire signal, no limiter/compressor, applied to playback and offline.
+    const outputGain = ctx.createGain();
+    outputGain.gain.value = 0.8912509381337456; // 10^(-1/20)
+    this.outputGain = outputGain;
+
     if (this.filterEnabled) {
       this.filters = createFilterChain(ctx, this.filterSlope);
       source.connect(this.filters[0]);
@@ -279,7 +290,8 @@ export class PlaybackEngine {
       source.connect(volumeGain);
     }
     volumeGain.connect(analyser);
-    analyser.connect(ctx.destination);
+    analyser.connect(outputGain);
+    outputGain.connect(ctx.destination);
   }
 
   private scheduleFilterAutomation(bufStartTime: number): void {

@@ -14,7 +14,7 @@ export class WaveformRenderer {
   private trimEnd = 10;
   private markers: Marker[] = [];
   private selectedMarkerId: number | null = null;
-  private paddingLeft = 40;
+  private paddingLeft = 60;
   private paddingRight = 20;
 
   private isDraggingTrimStart = false;
@@ -23,6 +23,7 @@ export class WaveformRenderer {
   private dragMarkerId: number | null = null;
   private trimVisible = true;
   private markersVisible = true;
+  private showBorder = false;
 
   private onTrimChange: ((start: number, end: number) => void) | null = null;
   private onMarkerAdd: ((time: number) => void) | null = null;
@@ -119,6 +120,11 @@ export class WaveformRenderer {
 
   setMarkersVisible(visible: boolean): void {
     this.markersVisible = visible;
+    this.render();
+  }
+
+  setShowBorder(show: boolean): void {
+    this.showBorder = show;
     this.render();
   }
 
@@ -380,6 +386,9 @@ export class WaveformRenderer {
 
     if (!this.peaks) return;
 
+    if (this.showBorder) {
+      this.drawBorder(w, h);
+    }
     this.drawWaveform(w, h);
     if (this.trimVisible) {
       this.drawTrimRegion(w, h);
@@ -391,6 +400,30 @@ export class WaveformRenderer {
     this.drawHoverLine(h);
     this.drawHomeLine(h);
     this.drawPlayhead(h);
+  }
+
+  private drawBorder(w: number, h: number): void {
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = this.ctx;
+    const x = this.paddingLeft * dpr;
+    const y = 4 * dpr;
+    const bw = w - (this.paddingLeft + this.paddingRight) * dpr;
+    const bh = h - 8 * dpr;
+    if (bw <= 0 || bh <= 0) return;
+    ctx.save();
+    ctx.strokeStyle = this.cssVar('--grid-border', '#2a4a5a');
+    ctx.lineWidth = 1.5 * dpr;
+    // Rounded rect for a nice look
+    const radius = 6 * dpr;
+    ctx.beginPath();
+    // @ts-ignore - roundRect may not be in older TS lib
+    if ((ctx as any).roundRect) {
+      (ctx as any).roundRect(x, y, bw, bh, radius);
+    } else {
+      ctx.rect(x, y, bw, bh);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawHoverLine(h: number): void {

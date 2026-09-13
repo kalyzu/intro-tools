@@ -34,10 +34,14 @@ export async function renderOffline(
   const lastFilter = filters[filters.length - 1];
 
   const volumeGain = offlineCtx.createGain();
+  // Static headroom -1 dBFS (0.891) for filter overshoot, matches playback
+  const outputGain = offlineCtx.createGain();
+  outputGain.gain.value = 0.8912509381337456; // 10^(-1/20)
 
   source.connect(filters[0]);
   lastFilter.connect(volumeGain);
-  volumeGain.connect(offlineCtx.destination);
+  volumeGain.connect(outputGain);
+  outputGain.connect(offlineCtx.destination);
 
   const step = 0.005;
   const rampDuration = 0.007;
@@ -117,7 +121,9 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
   let offset = 44;
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
-      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      // No hard-clipping: headroom gain (0.891) ensures peak <1.0 for filter overshoot.
+      // Direct conversion, allow float headroom to prevent distortion.
+      const sample = channels[ch][i];
       const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
       view.setInt16(offset, int16, true);
       offset += 2;
