@@ -31,6 +31,9 @@ export class AutomationEditor {
   private dragIndex = -1;
   private dragOffsetX = 0;
   private dragOffsetY = 0;
+  private dragStartTime = 0;
+  private dragStartFreq = 0;
+  private dragStartControlFreq: number | null = null;
   private playheadTime = 0;
   private homeTime = 0;
   private callbacks: AutomationEditorCallbacks;
@@ -47,6 +50,7 @@ export class AutomationEditor {
   private controlDragSegIndex = -1;
   private hoveredSegment = -1;
   private active = true;
+  private onAfterChange: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, callbacks: AutomationEditorCallbacks) {
     this.canvas = canvas;
@@ -129,6 +133,10 @@ export class AutomationEditor {
 
   setPanRequestCallback(cb: (delta: number) => void): void {
     this.onPanRequest = cb;
+  }
+
+  setAfterChangeCallback(cb: () => void): void {
+    this.onAfterChange = cb;
   }
 
   private onWheel(e: WheelEvent): void {
@@ -278,6 +286,7 @@ export class AutomationEditor {
     if (ctrlIdx >= 0) {
       this.isDraggingControl = true;
       this.controlDragSegIndex = ctrlIdx;
+      this.dragStartControlFreq = this.points[ctrlIdx].controlFreq;
       this.selectedIndex = null;
       this.callbacks.onPointSelect(null);
       this.render();
@@ -289,6 +298,8 @@ export class AutomationEditor {
       this.selectedIndex = idx;
       this.isDraggingPoint = true;
       this.dragIndex = idx;
+      this.dragStartTime = this.points[idx].time;
+      this.dragStartFreq = this.points[idx].frequency;
       const px = this.timeToX(this.points[idx].time);
       const py = this.freqToY(this.points[idx].frequency);
       this.dragOffsetX = coords.x - px;
@@ -407,16 +418,36 @@ export class AutomationEditor {
   }
 
   private onMouseUp(): void {
+    const wasDraggingControl = this.isDraggingControl;
+    const wasDraggingPoint = this.isDraggingPoint;
+    let didMove = false;
     if (this.isDraggingControl) {
+      const idx = this.controlDragSegIndex;
+      if (idx >= 0 && idx < this.points.length) {
+        const cur = this.points[idx].controlFreq;
+        if (cur !== this.dragStartControlFreq) didMove = true;
+      }
       this.isDraggingControl = false;
       this.controlDragSegIndex = -1;
       this.hideTooltip();
-      this.render();
     }
     if (this.isDraggingPoint) {
+      const idx = this.dragIndex;
+      if (idx >= 0 && idx < this.points.length) {
+        const p = this.points[idx];
+        if (p.time !== this.dragStartTime || p.frequency !== this.dragStartFreq) didMove = true;
+      }
       this.isDraggingPoint = false;
       this.dragIndex = -1;
       this.hideTooltip();
+    }
+    if (wasDraggingControl || wasDraggingPoint) {
+      if (didMove) {
+        // Drag is one undo step - push final state only if moved
+        this.callbacks.onPointsChange([...this.points]);
+        this.onAfterChange?.();
+      }
+      this.render();
     }
   }
 
@@ -448,6 +479,7 @@ export class AutomationEditor {
       }
       this.selectedIndex = idx;
       this.callbacks.onPointsChange([...this.points]);
+      this.onAfterChange?.();
       this.render();
     }
   }
@@ -479,6 +511,7 @@ export class AutomationEditor {
     this.selectedIndex = this.points.indexOf(newPoint);
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(this.selectedIndex);
+    this.onAfterChange?.();
     this.render();
   }
 
@@ -489,6 +522,7 @@ export class AutomationEditor {
     this.selectedIndex = null;
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(null);
+    this.onAfterChange?.();
     this.render();
   }
 

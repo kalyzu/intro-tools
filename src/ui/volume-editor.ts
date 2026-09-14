@@ -29,6 +29,9 @@ export class VolumeEditor {
   private dragIndex = -1;
   private dragOffsetX = 0;
   private dragOffsetY = 0;
+  private dragStartTime = 0;
+  private dragStartGain = 0;
+  private dragStartControlGain: number | null = null;
   private playheadTime = 0;
   private homeTime = 0;
   private callbacks: VolumeEditorCallbacks;
@@ -45,6 +48,7 @@ export class VolumeEditor {
   private controlDragSegIndex = -1;
   private hoveredSegment = -1;
   private active = true;
+  private onAfterChange: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, callbacks: VolumeEditorCallbacks) {
     this.canvas = canvas;
@@ -127,6 +131,10 @@ export class VolumeEditor {
 
   setPanRequestCallback(cb: (delta: number) => void): void {
     this.onPanRequest = cb;
+  }
+
+  setAfterChangeCallback(cb: () => void): void {
+    this.onAfterChange = cb;
   }
 
   private onWheel(e: WheelEvent): void {
@@ -269,6 +277,7 @@ export class VolumeEditor {
 
     const ctrlIdx = this.findControlHandleAt(coords);
     if (ctrlIdx >= 0) {
+      this.dragStartControlGain = this.points[ctrlIdx].controlGain;
       this.isDraggingControl = true;
       this.controlDragSegIndex = ctrlIdx;
       this.selectedIndex = null;
@@ -280,6 +289,8 @@ export class VolumeEditor {
     const idx = this.findPointAt(coords);
     if (idx >= 0) {
       this.selectedIndex = idx;
+      this.dragStartTime = this.points[idx].time;
+      this.dragStartGain = this.points[idx].gain;
       this.isDraggingPoint = true;
       this.dragIndex = idx;
       const px = this.timeToX(this.points[idx].time);
@@ -400,16 +411,35 @@ export class VolumeEditor {
   }
 
   private onMouseUp(): void {
+    const wasDraggingControl = this.isDraggingControl;
+    const wasDraggingPoint = this.isDraggingPoint;
+    let didMove = false;
     if (this.isDraggingControl) {
+      const idx = this.controlDragSegIndex;
+      if (idx >= 0 && idx < this.points.length) {
+        const cur = this.points[idx].controlGain;
+        if (cur !== this.dragStartControlGain) didMove = true;
+      }
       this.isDraggingControl = false;
       this.controlDragSegIndex = -1;
       this.hideTooltip();
-      this.render();
     }
     if (this.isDraggingPoint) {
+      const idx = this.dragIndex;
+      if (idx >= 0 && idx < this.points.length) {
+        const p = this.points[idx];
+        if (p.time !== this.dragStartTime || p.gain !== this.dragStartGain) didMove = true;
+      }
       this.isDraggingPoint = false;
       this.dragIndex = -1;
       this.hideTooltip();
+    }
+    if (wasDraggingControl || wasDraggingPoint) {
+      if (didMove) {
+        this.callbacks.onPointsChange([...this.points]);
+        this.onAfterChange?.();
+      }
+      this.render();
     }
   }
 
@@ -441,6 +471,7 @@ export class VolumeEditor {
       }
       this.selectedIndex = idx;
       this.callbacks.onPointsChange([...this.points]);
+      this.onAfterChange?.();
       this.render();
     }
   }
@@ -472,6 +503,7 @@ export class VolumeEditor {
     this.selectedIndex = this.points.indexOf(newPoint);
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(this.selectedIndex);
+    this.onAfterChange?.();
     this.render();
   }
 
@@ -482,6 +514,7 @@ export class VolumeEditor {
     this.selectedIndex = null;
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(null);
+    this.onAfterChange?.();
     this.render();
   }
 

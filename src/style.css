@@ -225,6 +225,20 @@ body {
 
 .btn:disabled {
   cursor: not-allowed;
+  opacity: 0.5;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+.btn-primary:disabled,
+.btn-success:disabled,
+.btn-export:disabled,
+.btn-export-secondary:disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border-color: var(--border);
+  opacity: 0.5;
 }
 
 .drop-zone {

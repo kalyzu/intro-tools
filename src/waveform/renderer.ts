@@ -23,6 +23,10 @@ export class WaveformRenderer {
   private isDraggingTrimEnd = false;
   private isDraggingMarker = false;
   private dragMarkerId: number | null = null;
+  private dragStartTrimStart = 0;
+  private dragStartTrimEnd = 0;
+  private dragStartMarkerTime = 0;
+  private dragStartSuggestedTime = 0;
   private isDraggingSuggestedMarker = false;
   private dragSuggestedMarkerId: number | null = null;
   private trimVisible = true;
@@ -39,6 +43,8 @@ export class WaveformRenderer {
   private static readonly BASE_BLOCK_SIZE = 256;
 
   private onTrimChange: ((start: number, end: number) => void) | null = null;
+  private onBeforeChange: (() => void) | null = null;
+  private onAfterChange: (() => void) | null = null;
   private onMarkerAdd: ((time: number) => void) | null = null;
   private onMarkerMove: ((id: number, time: number) => void) | null = null;
   private onMarkerSelect: ((id: number | null) => void) | null = null;
@@ -117,6 +123,14 @@ export class WaveformRenderer {
 
   setSeekCallback(cb: (time: number) => void): void {
     this.onSeek = cb;
+  }
+
+  setBeforeChangeCallback(cb: () => void): void {
+    this.onBeforeChange = cb;
+  }
+
+  setAfterChangeCallback(cb: () => void): void {
+    this.onAfterChange = cb;
   }
 
   setBuffer(buffer: AudioBuffer): void {
@@ -383,6 +397,7 @@ export class WaveformRenderer {
 
     const suggestedId = this.findSuggestedMarkerAt(coords);
     if (suggestedId !== null) {
+      this.onBeforeChange?.();
       this.isDraggingSuggestedMarker = true;
       this.dragSuggestedMarkerId = suggestedId;
       this.selectedSuggestedMarkerId = suggestedId;
@@ -395,6 +410,7 @@ export class WaveformRenderer {
 
     const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
     if (markerId !== null) {
+      this.onBeforeChange?.();
       this.isDraggingMarker = true;
       this.dragMarkerId = markerId;
       this.selectedMarkerId = markerId;
@@ -407,10 +423,12 @@ export class WaveformRenderer {
 
     const handle = this.trimVisible ? this.findTrimHandleAt(coords) : null;
     if (handle === 'start') {
+      this.onBeforeChange?.();
       this.isDraggingTrimStart = true;
       return;
     }
     if (handle === 'end') {
+      this.onBeforeChange?.();
       this.isDraggingTrimEnd = true;
       return;
     }
@@ -525,12 +543,30 @@ export class WaveformRenderer {
   }
 
   private onMouseUp(): void {
+    const wasDraggingTrim = this.isDraggingTrimStart || this.isDraggingTrimEnd;
+    const wasDraggingMarker = this.isDraggingMarker;
+    const wasDraggingSuggested = this.isDraggingSuggestedMarker;
+    let didMove = false;
+    if (wasDraggingTrim) {
+      if (this.trimStart !== this.dragStartTrimStart || this.trimEnd !== this.dragStartTrimEnd) didMove = true;
+    }
+    if (wasDraggingMarker && this.dragMarkerId !== null) {
+      const m = this.markers.find(x => x.id === this.dragMarkerId);
+      if (m && m.time !== this.dragStartMarkerTime) didMove = true;
+    }
+    if (wasDraggingSuggested && this.dragSuggestedMarkerId !== null) {
+      const m = this.suggestedMarkers.find(x => x.id === this.dragSuggestedMarkerId);
+      if (m && m.time !== this.dragStartSuggestedTime) didMove = true;
+    }
     this.isDraggingTrimStart = false;
     this.isDraggingTrimEnd = false;
     this.isDraggingMarker = false;
     this.dragMarkerId = null;
     this.isDraggingSuggestedMarker = false;
     this.dragSuggestedMarkerId = null;
+    if (didMove) {
+      this.onAfterChange?.();
+    }
   }
 
   private onMouseLeave(): void {

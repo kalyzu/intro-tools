@@ -11,6 +11,7 @@ import { WaveformRenderer } from './waveform/renderer';
 import { AutomationEditor } from './ui/automation-editor';
 import { VolumeEditor } from './ui/volume-editor';
 import { detectDrumOnsets } from './audio/onset';
+import { findRepeatingPattern, extendPattern } from './audio/pattern';
 import type { FilterSlope } from './audio/filter';
 import moonIcon from '../img/moon.svg';
 import sunIcon from '../img/sun.svg';
@@ -34,11 +35,15 @@ class LowPassEditor {
   private volumeEditor: VolumeEditor | null = null;
   private filterSlope: FilterSlope = 24;
 
-  private undoStack: AutomationPoint[][] = [];
-  private redoStack: AutomationPoint[][] = [];
-  private volumeUndoStack: VolumePoint[][] = [];
-  private volumeRedoStack: VolumePoint[][] = [];
   private maxUndoSize = 50;
+
+  // Per-page history
+  private trimHistory: { trimStart: number; trimEnd: number }[] = [];
+  private trimRedoHistory: { trimStart: number; trimEnd: number }[] = [];
+  private filterHistory: { automationPoints: AutomationPoint[]; volumePoints: VolumePoint[]; filterSlope: FilterSlope }[] = [];
+  private filterRedoHistory: typeof this.filterHistory = [];
+  private markersHistory: { markers: Marker[]; suggestedMarkers: Marker[]; nextMarkerId: number }[] = [];
+  private markersRedoHistory: typeof this.markersHistory = [];
 
   private trimStart = 0;
   private trimEnd = 0;
@@ -119,6 +124,7 @@ class LowPassEditor {
 
     const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement;
     slopeSelect.addEventListener('change', () => {
+      this.pushFilterHistory();
       this.filterSlope = parseInt(slopeSelect.value) as FilterSlope;
       this.playbackEngine.setFilterSlope(this.filterSlope);
       this.updateExportInfo();
@@ -127,6 +133,7 @@ class LowPassEditor {
     const trimCanvas = document.getElementById('waveform-canvas') as HTMLCanvasElement;
     this.trimWaveform = new WaveformRenderer(trimCanvas);
     this.trimWaveform.setTrimChangeCallback((start, end) => this.onTrimChange(start, end));
+    this.trimWaveform.setAfterChangeCallback(() => this.pushTrimHistory());
     this.trimWaveform.setSeekCallback((time) => {
       this.playbackEngine.seek(this.clampTrimTime(time - this.trimStart));
       this.updateHomeLines();
@@ -149,6 +156,7 @@ class LowPassEditor {
       this.updateHomeLines();
     });
     this.markerWaveform.setDeferSeekToDoubleClick(true);
+    this.markerWaveform.setAfterChangeCallback(() => this.pushMarkersHistory());
 
     const refCanvas = document.getElementById('ref-waveform-canvas') as HTMLCanvasElement;
     this.refWaveform = new WaveformRenderer(refCanvas);
@@ -185,7 +193,7 @@ class LowPassEditor {
     });
     this.automationEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
     this.automationEditor.setPanRequestCallback((delta) => this.panView(delta));
-
+    this.automationEditor.setAfterChangeCallback(() => this.pushFilterHistory());
     const volumeCanvas = document.getElementById('volume-canvas') as HTMLCanvasElement;
     this.volumeEditor = new VolumeEditor(volumeCanvas, {
       onPointsChange: (points) => this.onVolumePointsChange(points),
@@ -199,6 +207,7 @@ class LowPassEditor {
     });
     this.volumeEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
     this.volumeEditor.setPanRequestCallback((delta) => this.panView(delta));
+    this.volumeEditor.setAfterChangeCallback(() => this.pushFilterHistory());
 
     const zoomSlider = document.getElementById('zoom-slider') as HTMLInputElement;
     const markerZoomSlider = document.getElementById('marker-zoom-slider') as HTMLInputElement;
@@ -223,14 +232,29 @@ class LowPassEditor {
       this.updateZoom(1);
     });
 
+    const trimUndoBtn = document.getElementById('trim-undo-btn') as HTMLButtonElement | null;
+    const trimRedoBtn = document.getElementById('trim-redo-btn') as HTMLButtonElement | null;
+    const filterUndoBtn = document.getElementById('filter-undo-btn') as HTMLButtonElement | null;
+    const filterRedoBtn = document.getElementById('filter-redo-btn') as HTMLButtonElement | null;
+    const markersUndoBtn = document.getElementById('markers-undo-btn') as HTMLButtonElement | null;
+    const markersRedoBtn = document.getElementById('markers-redo-btn') as HTMLButtonElement | null;
+    trimUndoBtn?.addEventListener('click', () => this.undo());
+    trimRedoBtn?.addEventListener('click', () => this.redo());
+    filterUndoBtn?.addEventListener('click', () => this.undo());
+    filterRedoBtn?.addEventListener('click', () => this.redo());
+    markersUndoBtn?.addEventListener('click', () => this.undo());
+    markersRedoBtn?.addEventListener('click', () => this.redo());
+
     const suggestBtn = document.getElementById('suggest-btn') as HTMLButtonElement | null;
     const toggleSuggestedBtn = document.getElementById('toggle-suggested-btn') as HTMLButtonElement | null;
     const applySuggestedBtn = document.getElementById('apply-suggested-btn') as HTMLButtonElement | null;
     const clearSuggestedBtn = document.getElementById('clear-suggested-btn') as HTMLButtonElement | null;
+    const suggestPatternBtn = document.getElementById('suggest-pattern-btn') as HTMLButtonElement | null;
     suggestBtn?.addEventListener('click', () => this.generateSuggested());
     toggleSuggestedBtn?.addEventListener('click', () => this.toggleSuggested());
     applySuggestedBtn?.addEventListener('click', () => this.applySuggested());
     clearSuggestedBtn?.addEventListener('click', () => this.clearSuggested());
+    suggestPatternBtn?.addEventListener('click', () => this.generatePatternSuggested());
   }
 
   private setupKeyboardShortcuts(): void {
@@ -341,8 +365,16 @@ class LowPassEditor {
       this.automationCustomized = false;
       this.volumePoints = createDefaultVolumeAutomation(this.getTrimDuration());
       this.volumeCustomized = false;
-      this.pushUndo();
-      this.pushVolumeUndo();
+      // Per-page history
+      this.trimHistory = [];
+      this.trimRedoHistory = [];
+      this.filterHistory = [];
+      this.filterRedoHistory = [];
+      this.markersHistory = [];
+      this.markersRedoHistory = [];
+      this.pushTrimHistory();
+      this.pushFilterHistory();
+      this.pushMarkersHistory();
 
       this.playbackEngine.setBuffer(this.decodedAudio.buffer);
       this.playbackEngine.setTrim(this.trimStart, this.trimEnd);
@@ -449,6 +481,7 @@ class LowPassEditor {
       this.view = { viewStart: 0, viewEnd: axisDuration };
     }
     this.syncView();
+    this.updateUndoRedoButtons();
   }
 
   private syncView(): void {
@@ -589,6 +622,14 @@ class LowPassEditor {
     this.volumeEditor!.setDuration(trimmedDuration);
     this.volumeEditor!.setPoints(this.volumePoints);
 
+    // Push initial state for filter page if not already
+    if (this.filterHistory.length === 0) {
+      this.pushFilterHistory();
+    }
+    if (this.markersHistory.length === 0) {
+      this.pushMarkersHistory();
+    }
+
     this.mode = 'filter';
     this.showModeScreen();
     this.updateTrimDisplay();
@@ -640,7 +681,7 @@ class LowPassEditor {
       points = createDefaultAutomation(duration);
     }
     this.automationPoints = points;
-    this.pushUndo();
+    // Do not push history here - caller will handle per-page history
   }
 
   private ensureVolumeFits(duration: number): void {
@@ -654,7 +695,7 @@ class LowPassEditor {
       points = createDefaultVolumeAutomation(duration);
     }
     this.volumePoints = points;
-    this.pushVolumeUndo();
+    // Do not push history here - caller will handle per-page history
   }
 
   private onTrimChange(start: number, end: number): void {
@@ -688,6 +729,7 @@ class LowPassEditor {
     this.markerWaveform?.setSelectedMarker(marker.id);
     this.updateMarkerDisplay();
     this.updateExportButtons();
+    this.pushMarkersHistory();
   }
 
   private moveMarker(id: number, time: number): void {
@@ -712,6 +754,7 @@ class LowPassEditor {
     this.markerWaveform?.setSelectedMarker(null);
     this.updateMarkerDisplay();
     this.updateExportButtons();
+    this.pushMarkersHistory();
   }
 
   private updateMarkerDisplay(): void {
@@ -772,12 +815,71 @@ class LowPassEditor {
 
   private generateSuggested(): void {
     if (!this.trimmedBuffer) return;
+
+    // If green suggestions already exist, correct them instead of adding new ones
+    if (this.suggestedMarkers.length > 0) {
+      const freshTimes = detectDrumOnsets(this.trimmedBuffer);
+      let corrected = 0;
+      for (const sm of this.suggestedMarkers) {
+        // Find closest fresh detection within 60ms
+        let best: number | null = null;
+        let bestDist = Infinity;
+        for (const t of freshTimes) {
+          const d = Math.abs(t - sm.time);
+          if (d < bestDist && d < 0.06) {
+            bestDist = d;
+            best = t;
+          }
+        }
+        if (best !== null) {
+          const clamped = Math.max(0, Math.min(this.getTrimDuration(), best));
+          // Avoid colliding with existing official markers
+          const collides = this.markers.some(m => Math.abs(m.time - clamped) < 0.03);
+          if (!collides) {
+            sm.time = clamped;
+            corrected++;
+          }
+        } else {
+          // Fallback: snap to pattern grid if available
+          const allTimes = [...this.markers, ...this.suggestedMarkers].map(m => m.time).sort((a, b) => a - b);
+          const pattern = findRepeatingPattern(allTimes, this.getTrimDuration());
+          if (pattern) {
+            // Find nearest grid point
+            const interval = pattern.interval;
+            const phase = allTimes[0] % interval;
+            let bestGrid: number | null = null;
+            let bestGridDist = Infinity;
+            for (let k = 0; k * interval <= this.getTrimDuration() + interval; k++) {
+              const gridTime = phase + k * interval;
+              const d = Math.abs(gridTime - sm.time);
+              if (d < bestGridDist && d < pattern.tolerance) {
+                bestGridDist = d;
+                bestGrid = gridTime;
+              }
+            }
+            if (bestGrid !== null) {
+              const clamped = Math.max(0, Math.min(this.getTrimDuration(), bestGrid));
+              if (!this.markers.some(m => Math.abs(m.time - clamped) < 0.03)) {
+                sm.time = clamped;
+                corrected++;
+              }
+            }
+          }
+        }
+      }
+      this.suggestedMarkers.sort((a, b) => a.time - b.time);
+      this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+      this.updateMarkerDisplay();
+      this.updateSuggestedButtons();
+      this.pushMarkersHistory();
+      return;
+    }
+
+    // No existing suggestions: generate fresh from detection
     const times = detectDrumOnsets(this.trimmedBuffer);
-    // Convert to markers, avoid duplicates within 0.03s of existing
     const newMarkers: Marker[] = [];
     for (const t of times) {
       const clamped = Math.max(0, Math.min(this.getTrimDuration(), t));
-      // Avoid duplicate with existing official or suggested within 30ms
       const exists = [...this.markers, ...newMarkers].some(m => Math.abs(m.time - clamped) < 0.03);
       if (exists) continue;
       newMarkers.push({ id: this.nextMarkerId++, time: clamped });
@@ -793,6 +895,47 @@ class LowPassEditor {
     this.markerWaveform?.setSelectedSuggestedMarker(null);
     this.updateMarkerDisplay();
     this.updateSuggestedButtons();
+    this.pushMarkersHistory();
+  }
+
+  private generatePatternSuggested(): void {
+    if (!this.trimmedBuffer) return;
+    if (this.markers.length < 2) {
+      alert('Place at least 2 yellow markers to detect a pattern (e.g., 2-3 beats).');
+      return;
+    }
+    const times = this.markers.map(m => m.time).sort((a, b) => a - b);
+    const duration = this.getTrimDuration();
+    const pattern = findRepeatingPattern(times, duration);
+    if (!pattern) {
+      alert('Could not find a repeating pattern. Try more evenly spaced markers.');
+      return;
+    }
+    const existingTimes = this.markers.map(m => m.time);
+    const extended = extendPattern(times, pattern, duration, existingTimes);
+    if (extended.length === 0) {
+      alert(`Pattern found: interval ${pattern.interval.toFixed(3)}s (confidence ${(pattern.confidence * 100).toFixed(0)}%), but no new markers to add. Try extending the trim or adding more markers.`);
+      return;
+    }
+    const newMarkers: Marker[] = extended.map(t => ({ id: this.nextMarkerId++, time: Math.max(0, Math.min(duration, t)) }));
+    // Merge with existing suggested, dedup 30ms
+    const merged = [...this.suggestedMarkers];
+    for (const nm of newMarkers) {
+      const exists = [...this.markers, ...merged].some(m => Math.abs(m.time - nm.time) < 0.03);
+      if (!exists) merged.push(nm);
+    }
+    merged.sort((a, b) => a.time - b.time);
+    this.suggestedMarkers = merged;
+    this.suggestedVisible = true;
+    this.selectedSuggestedMarkerId = null;
+    this.selectedMarkerId = null;
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSuggestedVisible(true);
+    this.markerWaveform?.setSelectedMarker(null);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateSuggestedButtons();
+    console.log(`Pattern: interval ${pattern.interval.toFixed(3)}s confidence ${(pattern.confidence * 100).toFixed(0)}% tolerance ${pattern.tolerance.toFixed(3)}s extended ${extended.length} markers`);
   }
 
   private toggleSuggested(): void {
@@ -861,14 +1004,16 @@ class LowPassEditor {
     this.automationPoints = sortPoints(points);
     this.automationCustomized = true;
     this.playbackEngine.setAutomationPoints(this.automationPoints);
-    this.pushUndo();
+    // History pushed at drag start via onBeforeChange, not here
+    this.updateUndoRedoButtons();
   }
 
   private onVolumePointsChange(points: VolumePoint[]): void {
     this.volumePoints = sortVolumePoints(points);
     this.volumeCustomized = true;
     this.playbackEngine.setVolumePoints(this.volumePoints);
-    this.pushVolumeUndo();
+    // History pushed at drag start via onBeforeChange, not here
+    this.updateUndoRedoButtons();
   }
 
   private onTimeUpdate(time: number): void {
@@ -1047,81 +1192,189 @@ class LowPassEditor {
     URL.revokeObjectURL(url);
   }
 
-  private pushUndo(): void {
-    this.undoStack.push(this.automationPoints.map(p => ({ ...p })));
-    if (this.undoStack.length > this.maxUndoSize) {
-      this.undoStack.shift();
-    }
-    this.redoStack = [];
+  // Per-page history
+  private pushTrimHistory(): void {
+    this.trimHistory.push({ trimStart: this.trimStart, trimEnd: this.trimEnd });
+    if (this.trimHistory.length > this.maxUndoSize) this.trimHistory.shift();
+    this.trimRedoHistory = [];
+    this.updateUndoRedoButtons();
   }
 
-  private pushVolumeUndo(): void {
-    this.volumeUndoStack.push(this.volumePoints.map(p => ({ ...p })));
-    if (this.volumeUndoStack.length > this.maxUndoSize) {
-      this.volumeUndoStack.shift();
+  private pushFilterHistory(): void {
+    this.filterHistory.push({
+      automationPoints: this.automationPoints.map(p => ({ ...p })),
+      volumePoints: this.volumePoints.map(p => ({ ...p })),
+      filterSlope: this.filterSlope,
+    });
+    if (this.filterHistory.length > this.maxUndoSize) this.filterHistory.shift();
+    this.filterRedoHistory = [];
+    this.updateUndoRedoButtons();
+  }
+
+  private pushMarkersHistory(): void {
+    this.markersHistory.push({
+      markers: this.markers.map(m => ({ ...m })),
+      suggestedMarkers: this.suggestedMarkers.map(m => ({ ...m })),
+      nextMarkerId: this.nextMarkerId,
+    });
+    if (this.markersHistory.length > this.maxUndoSize) this.markersHistory.shift();
+    this.markersRedoHistory = [];
+    this.updateUndoRedoButtons();
+  }
+
+  private updateUndoRedoButtons(): void {
+    const mode = this.mode;
+    let canUndo = false, canRedo = false;
+    if (mode === 'trim') {
+      canUndo = this.trimHistory.length > 1;
+      canRedo = this.trimRedoHistory.length > 0;
+      const undoBtn = document.getElementById('trim-undo-btn') as HTMLButtonElement | null;
+      const redoBtn = document.getElementById('trim-redo-btn') as HTMLButtonElement | null;
+      if (undoBtn) undoBtn.disabled = !canUndo;
+      if (redoBtn) redoBtn.disabled = !canRedo;
+    } else if (mode === 'filter') {
+      canUndo = this.filterHistory.length > 1;
+      canRedo = this.filterRedoHistory.length > 0;
+      const undoBtn = document.getElementById('filter-undo-btn') as HTMLButtonElement | null;
+      const redoBtn = document.getElementById('filter-redo-btn') as HTMLButtonElement | null;
+      if (undoBtn) undoBtn.disabled = !canUndo;
+      if (redoBtn) redoBtn.disabled = !canRedo;
+    } else if (mode === 'markers') {
+      canUndo = this.markersHistory.length > 1;
+      canRedo = this.markersRedoHistory.length > 0;
+      const undoBtn = document.getElementById('markers-undo-btn') as HTMLButtonElement | null;
+      const redoBtn = document.getElementById('markers-redo-btn') as HTMLButtonElement | null;
+      if (undoBtn) undoBtn.disabled = !canUndo;
+      if (redoBtn) redoBtn.disabled = !canRedo;
     }
-    this.volumeRedoStack = [];
+    // Also update legacy buttons if exist
+    const legacyUndo = document.getElementById('undo-btn') as HTMLButtonElement | null;
+    const legacyRedo = document.getElementById('redo-btn') as HTMLButtonElement | null;
+    if (legacyUndo) legacyUndo.disabled = !canUndo;
+    if (legacyRedo) legacyRedo.disabled = !canRedo;
+  }
+
+  private undoTrim(): void {
+    if (this.trimHistory.length <= 1) return;
+    const current = this.trimHistory.pop()!;
+    this.trimRedoHistory.push(current);
+    const prev = this.trimHistory[this.trimHistory.length - 1];
+    this.trimStart = prev.trimStart;
+    this.trimEnd = prev.trimEnd;
+    this.playbackEngine.setTrim(this.trimStart, this.trimEnd);
+    this.trimWaveform?.setTrim(this.trimStart, this.trimEnd);
+    this.updateTrimDisplay();
+    this.updateUndoRedoButtons();
+  }
+
+  private redoTrim(): void {
+    if (this.trimRedoHistory.length === 0) return;
+    const next = this.trimRedoHistory.pop()!;
+    this.trimHistory.push(next);
+    this.trimStart = next.trimStart;
+    this.trimEnd = next.trimEnd;
+    this.playbackEngine.setTrim(this.trimStart, this.trimEnd);
+    this.trimWaveform?.setTrim(this.trimStart, this.trimEnd);
+    this.updateTrimDisplay();
+    this.updateUndoRedoButtons();
+  }
+
+  private undoFilter(): void {
+    if (this.filterHistory.length <= 1) return;
+    const current = this.filterHistory.pop()!;
+    this.filterRedoHistory.push(current);
+    const prev = this.filterHistory[this.filterHistory.length - 1];
+    this.automationPoints = prev.automationPoints.map(p => ({ ...p }));
+    this.volumePoints = prev.volumePoints.map(p => ({ ...p }));
+    this.filterSlope = prev.filterSlope;
+    this.playbackEngine.setAutomationPoints(this.automationPoints);
+    this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.playbackEngine.setFilterSlope(this.filterSlope);
+    this.automationEditor?.setPoints(this.automationPoints);
+    this.volumeEditor?.setPoints(this.volumePoints);
+    const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement | null;
+    if (slopeSelect) slopeSelect.value = String(this.filterSlope);
+    this.updateExportInfo();
+    this.updateUndoRedoButtons();
+  }
+
+  private redoFilter(): void {
+    if (this.filterRedoHistory.length === 0) return;
+    const next = this.filterRedoHistory.pop()!;
+    this.filterHistory.push(next);
+    this.automationPoints = next.automationPoints.map(p => ({ ...p }));
+    this.volumePoints = next.volumePoints.map(p => ({ ...p }));
+    this.filterSlope = next.filterSlope;
+    this.playbackEngine.setAutomationPoints(this.automationPoints);
+    this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.playbackEngine.setFilterSlope(this.filterSlope);
+    this.automationEditor?.setPoints(this.automationPoints);
+    this.volumeEditor?.setPoints(this.volumePoints);
+    const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement | null;
+    if (slopeSelect) slopeSelect.value = String(this.filterSlope);
+    this.updateExportInfo();
+    this.updateUndoRedoButtons();
+  }
+
+  private undoMarkers(): void {
+    if (this.markersHistory.length <= 1) return;
+    const current = this.markersHistory.pop()!;
+    this.markersRedoHistory.push(current);
+    const prev = this.markersHistory[this.markersHistory.length - 1];
+    this.markers = prev.markers.map(m => ({ ...m }));
+    this.suggestedMarkers = prev.suggestedMarkers.map(m => ({ ...m }));
+    this.nextMarkerId = prev.nextMarkerId;
+    this.selectedMarkerId = null;
+    this.selectedSuggestedMarkerId = null;
+    this.markerWaveform?.setMarkers(this.markers);
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSelectedMarker(null);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateExportButtons();
+    this.updateSuggestedButtons();
+    this.updateUndoRedoButtons();
+  }
+
+  private redoMarkers(): void {
+    if (this.markersRedoHistory.length === 0) return;
+    const next = this.markersRedoHistory.pop()!;
+    this.markersHistory.push(next);
+    this.markers = next.markers.map(m => ({ ...m }));
+    this.suggestedMarkers = next.suggestedMarkers.map(m => ({ ...m }));
+    this.nextMarkerId = next.nextMarkerId;
+    this.selectedMarkerId = null;
+    this.selectedSuggestedMarkerId = null;
+    this.markerWaveform?.setMarkers(this.markers);
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSelectedMarker(null);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateExportButtons();
+    this.updateSuggestedButtons();
+    this.updateUndoRedoButtons();
   }
 
   private undo(): void {
-    // Undo volume if its editor is focused? For simplicity, undo both stacks together
-    // Try volume first if volume editor has selection, otherwise filter
-    const volSel = this.volumeEditor?.getSelectedIndex();
-    if (volSel !== null && volSel !== undefined && this.volumeUndoStack.length > 1) {
-      const current = this.volumeUndoStack.pop()!;
-      this.volumeRedoStack.push(current);
-      const prev = this.volumeUndoStack[this.volumeUndoStack.length - 1];
-      this.restoreVolumeState(prev);
-      return;
+    if (this.mode === 'trim') {
+      this.undoTrim();
+    } else if (this.mode === 'filter') {
+      this.undoFilter();
+    } else if (this.mode === 'markers') {
+      this.undoMarkers();
     }
-    if (this.undoStack.length <= 1) {
-      // fallback to volume if filter has no undo
-      if (this.volumeUndoStack.length > 1) {
-        const current = this.volumeUndoStack.pop()!;
-        this.volumeRedoStack.push(current);
-        const prev = this.volumeUndoStack[this.volumeUndoStack.length - 1];
-        this.restoreVolumeState(prev);
-      }
-      return;
-    }
-    const current = this.undoStack.pop()!;
-    this.redoStack.push(current);
-    const prev = this.undoStack[this.undoStack.length - 1];
-    this.restoreState(prev);
   }
 
   private redo(): void {
-    const volSel = this.volumeEditor?.getSelectedIndex();
-    if (volSel !== null && volSel !== undefined && this.volumeRedoStack.length > 0) {
-      const next = this.volumeRedoStack.pop()!;
-      this.volumeUndoStack.push(next);
-      this.restoreVolumeState(next);
-      return;
+    if (this.mode === 'trim') {
+      this.redoTrim();
+    } else if (this.mode === 'filter') {
+      this.redoFilter();
+    } else if (this.mode === 'markers') {
+      this.redoMarkers();
     }
-    if (this.redoStack.length === 0) {
-      if (this.volumeRedoStack.length > 0) {
-        const next = this.volumeRedoStack.pop()!;
-        this.volumeUndoStack.push(next);
-        this.restoreVolumeState(next);
-      }
-      return;
-    }
-    const next = this.redoStack.pop()!;
-    this.undoStack.push(next);
-    this.restoreState(next);
   }
 
-  private restoreState(points: AutomationPoint[]): void {
-    this.automationPoints = points.map(p => ({ ...p }));
-    this.playbackEngine.setAutomationPoints(this.automationPoints);
-    this.automationEditor!.setPoints(this.automationPoints);
-  }
-
-  private restoreVolumeState(points: VolumePoint[]): void {
-    this.volumePoints = points.map(p => ({ ...p }));
-    this.playbackEngine.setVolumePoints(this.volumePoints);
-    this.volumeEditor!.setPoints(this.volumePoints);
-  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
