@@ -10,6 +10,7 @@ import { renderOffline } from './audio/renderer';
 import { WaveformRenderer } from './waveform/renderer';
 import { AutomationEditor } from './ui/automation-editor';
 import { VolumeEditor } from './ui/volume-editor';
+import { detectDrumOnsets } from './audio/onset';
 import type { FilterSlope } from './audio/filter';
 import moonIcon from '../img/moon.svg';
 import sunIcon from '../img/sun.svg';
@@ -44,6 +45,9 @@ class LowPassEditor {
   private markers: Marker[] = [];
   private nextMarkerId = 1;
   private selectedMarkerId: number | null = null;
+  private suggestedMarkers: Marker[] = [];
+  private suggestedVisible = true;
+  private selectedSuggestedMarkerId: number | null = null;
   private view: ViewState = { viewStart: 0, viewEnd: 10 };
 
   constructor() {
@@ -136,6 +140,10 @@ class LowPassEditor {
       (id, time) => this.moveMarker(id, time),
       (id) => this.selectMarker(id),
     );
+    this.markerWaveform.setSuggestedMarkerCallbacks(
+      (id, time) => this.moveSuggestedMarker(id, time),
+      (id) => this.selectSuggestedMarker(id),
+    );
     this.markerWaveform.setSeekCallback((time) => {
       this.playbackEngine.seek(this.clampTrimTime(time));
       this.updateHomeLines();
@@ -214,6 +222,15 @@ class LowPassEditor {
       filterZoomSlider.value = '1';
       this.updateZoom(1);
     });
+
+    const suggestBtn = document.getElementById('suggest-btn') as HTMLButtonElement | null;
+    const toggleSuggestedBtn = document.getElementById('toggle-suggested-btn') as HTMLButtonElement | null;
+    const applySuggestedBtn = document.getElementById('apply-suggested-btn') as HTMLButtonElement | null;
+    const clearSuggestedBtn = document.getElementById('clear-suggested-btn') as HTMLButtonElement | null;
+    suggestBtn?.addEventListener('click', () => this.generateSuggested());
+    toggleSuggestedBtn?.addEventListener('click', () => this.toggleSuggested());
+    applySuggestedBtn?.addEventListener('click', () => this.applySuggested());
+    clearSuggestedBtn?.addEventListener('click', () => this.clearSuggested());
   }
 
   private setupKeyboardShortcuts(): void {
@@ -248,9 +265,14 @@ class LowPassEditor {
         }
       }
 
-      if (this.mode === 'markers' && (e.key === 'Delete' || e.key === 'Backspace') && this.selectedMarkerId !== null) {
-        e.preventDefault();
-        this.deleteMarker(this.selectedMarkerId);
+      if (this.mode === 'markers' && (e.key === 'Delete' || e.key === 'Backspace')) {
+        if (this.selectedSuggestedMarkerId !== null) {
+          e.preventDefault();
+          this.deleteSuggestedMarker(this.selectedSuggestedMarkerId);
+        } else if (this.selectedMarkerId !== null) {
+          e.preventDefault();
+          this.deleteMarker(this.selectedMarkerId);
+        }
       }
     });
   }
@@ -311,6 +333,9 @@ class LowPassEditor {
       this.markers = [];
       this.nextMarkerId = 1;
       this.selectedMarkerId = null;
+      this.suggestedMarkers = [];
+      this.selectedSuggestedMarkerId = null;
+      this.suggestedVisible = true;
 
       this.automationPoints = createDefaultAutomation(this.getTrimDuration());
       this.automationCustomized = false;
@@ -537,6 +562,10 @@ class LowPassEditor {
     if (this.selectedMarkerId !== null && !this.markers.some(m => m.id === this.selectedMarkerId)) {
       this.selectedMarkerId = null;
     }
+    this.suggestedMarkers = this.suggestedMarkers.filter(m => m.time <= trimmedDuration);
+    if (this.selectedSuggestedMarkerId !== null && !this.suggestedMarkers.some(m => m.id === this.selectedSuggestedMarkerId)) {
+      this.selectedSuggestedMarkerId = null;
+    }
 
     this.ensureAutomationFits(trimmedDuration);
     this.ensureVolumeFits(trimmedDuration);
@@ -551,6 +580,9 @@ class LowPassEditor {
     this.markerWaveform!.setTrim(0, trimmedDuration);
     this.markerWaveform!.setMarkers(this.markers);
     this.markerWaveform!.setSelectedMarker(this.selectedMarkerId);
+    this.markerWaveform!.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform!.setSuggestedVisible(this.suggestedVisible);
+    this.markerWaveform!.setSelectedSuggestedMarker(this.selectedSuggestedMarkerId);
 
     this.automationEditor!.setDuration(trimmedDuration);
     this.automationEditor!.setPoints(this.automationPoints);
@@ -579,11 +611,15 @@ class LowPassEditor {
     this.mode = 'markers';
     this.markerWaveform?.setMarkers(this.markers);
     this.markerWaveform?.setSelectedMarker(this.selectedMarkerId);
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSuggestedVisible(this.suggestedVisible);
+    this.markerWaveform?.setSelectedSuggestedMarker(this.selectedSuggestedMarkerId);
     this.showModeScreen();
     this.updateTrimDisplay();
     this.updateExportInfo();
     this.updateMarkerDisplay();
     this.updateExportButtons();
+    this.updateSuggestedButtons();
   }
 
   private backToFilter(): void {
@@ -689,6 +725,15 @@ class LowPassEditor {
         } else {
           el.hidden = true;
         }
+      } else if (this.selectedSuggestedMarkerId !== null) {
+        const sel = this.suggestedMarkers.find(m => m.id === this.selectedSuggestedMarkerId);
+        if (sel) {
+          el.textContent = `Suggested: ${sel.time.toFixed(2)}s`;
+          el.hidden = false;
+          el.style.color = 'var(--success)';
+        } else {
+          el.hidden = true;
+        }
       } else {
         el.hidden = true;
       }
@@ -701,12 +746,115 @@ class LowPassEditor {
         if (this.selectedMarkerId !== null) {
           const sel = this.markers.find(m => m.id === this.selectedMarkerId);
           beatLabel.textContent = sel ? `♪ ${sel.time.toFixed(2)}s` : '—';
+        } else if (this.selectedSuggestedMarkerId !== null) {
+          const sel = this.suggestedMarkers.find(m => m.id === this.selectedSuggestedMarkerId);
+          beatLabel.textContent = sel ? `♪ ${sel.time.toFixed(2)}s` : '—';
         } else {
           beatLabel.textContent = '—';
           beatLight.classList.remove('active');
         }
       }
     }
+    this.updateSuggestedButtons();
+  }
+
+  private updateSuggestedButtons(): void {
+    const toggleBtn = document.getElementById('toggle-suggested-btn') as HTMLButtonElement | null;
+    const applyBtn = document.getElementById('apply-suggested-btn') as HTMLButtonElement | null;
+    if (toggleBtn) {
+      toggleBtn.textContent = this.suggestedVisible ? 'Hide Suggested' : 'Show Suggested';
+      toggleBtn.disabled = this.suggestedMarkers.length === 0;
+    }
+    if (applyBtn) {
+      applyBtn.disabled = this.suggestedMarkers.length === 0;
+    }
+  }
+
+  private generateSuggested(): void {
+    if (!this.trimmedBuffer) return;
+    const times = detectDrumOnsets(this.trimmedBuffer);
+    // Convert to markers, avoid duplicates within 0.03s of existing
+    const newMarkers: Marker[] = [];
+    for (const t of times) {
+      const clamped = Math.max(0, Math.min(this.getTrimDuration(), t));
+      // Avoid duplicate with existing official or suggested within 30ms
+      const exists = [...this.markers, ...newMarkers].some(m => Math.abs(m.time - clamped) < 0.03);
+      if (exists) continue;
+      newMarkers.push({ id: this.nextMarkerId++, time: clamped });
+    }
+    newMarkers.sort((a, b) => a.time - b.time);
+    this.suggestedMarkers = newMarkers;
+    this.suggestedVisible = true;
+    this.selectedSuggestedMarkerId = null;
+    this.selectedMarkerId = null;
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSuggestedVisible(this.suggestedVisible);
+    this.markerWaveform?.setSelectedMarker(null);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateSuggestedButtons();
+  }
+
+  private toggleSuggested(): void {
+    this.suggestedVisible = !this.suggestedVisible;
+    this.markerWaveform?.setSuggestedVisible(this.suggestedVisible);
+    this.updateSuggestedButtons();
+  }
+
+  private applySuggested(): void {
+    if (this.suggestedMarkers.length === 0) return;
+    // Merge suggested into official, sorted, dedup within 30ms
+    for (const sm of this.suggestedMarkers) {
+      const exists = this.markers.some(m => Math.abs(m.time - sm.time) < 0.03);
+      if (!exists) {
+        this.markers.push({ ...sm });
+      }
+    }
+    this.markers.sort((a, b) => a.time - b.time);
+    this.suggestedMarkers = [];
+    this.suggestedVisible = true;
+    this.selectedSuggestedMarkerId = null;
+    this.markerWaveform?.setSuggestedMarkers([]);
+    this.markerWaveform?.setSuggestedVisible(true);
+    this.markerWaveform?.setMarkers(this.markers);
+    this.updateMarkerDisplay();
+    this.updateExportButtons();
+    this.updateSuggestedButtons();
+  }
+
+  private clearSuggested(): void {
+    this.suggestedMarkers = [];
+    this.selectedSuggestedMarkerId = null;
+    this.markerWaveform?.setSuggestedMarkers([]);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateSuggestedButtons();
+  }
+
+  private moveSuggestedMarker(id: number, time: number): void {
+    const m = this.suggestedMarkers.find(x => x.id === id);
+    if (!m) return;
+    m.time = Math.max(0, Math.min(this.getTrimDuration(), time));
+    this.suggestedMarkers.sort((a, b) => a.time - b.time);
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.updateMarkerDisplay();
+  }
+
+  private selectSuggestedMarker(id: number | null): void {
+    this.selectedSuggestedMarkerId = id;
+    if (id !== null) this.selectedMarkerId = null;
+    this.markerWaveform?.setSelectedSuggestedMarker(id);
+    this.markerWaveform?.setSelectedMarker(null);
+    this.updateMarkerDisplay();
+  }
+
+  private deleteSuggestedMarker(id: number): void {
+    this.suggestedMarkers = this.suggestedMarkers.filter(m => m.id !== id);
+    this.selectedSuggestedMarkerId = null;
+    this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+    this.markerWaveform?.setSelectedSuggestedMarker(null);
+    this.updateMarkerDisplay();
+    this.updateSuggestedButtons();
   }
 
   private onPointsChange(points: AutomationPoint[]): void {
@@ -755,7 +903,8 @@ class LowPassEditor {
     const label = document.getElementById('beat-display-label');
     if (!light || !label) return;
 
-    if (this.markers.length === 0) {
+    const allMarkers = this.suggestedVisible ? [...this.markers, ...this.suggestedMarkers] : this.markers;
+    if (allMarkers.length === 0) {
       label.textContent = '—';
       light.classList.remove('active');
       return;
@@ -764,7 +913,7 @@ class LowPassEditor {
     // Immediate on/off, no debounce or timeout — on when playhead is at a marker
     const threshold = 0.03; // 30ms : tight enough for “now”, wide enough for 16ms update
     let hit: Marker | null = null;
-    for (const m of this.markers) {
+    for (const m of allMarkers) {
       if (Math.abs(m.time - time) < threshold) {
         hit = m;
         break;
@@ -777,7 +926,12 @@ class LowPassEditor {
     } else {
       light.classList.remove('active');
       if (this.playbackEngine.getState() !== 'playing') {
-        const sel = this.selectedMarkerId !== null ? this.markers.find(m => m.id === this.selectedMarkerId) : null;
+        const sel =
+          this.selectedMarkerId !== null
+            ? this.markers.find(m => m.id === this.selectedMarkerId)
+            : this.selectedSuggestedMarkerId !== null
+              ? this.suggestedMarkers.find(m => m.id === this.selectedSuggestedMarkerId)
+              : null;
         label.textContent = sel ? `♪ ${sel.time.toFixed(2)}s` : '—';
       } else {
         label.textContent = '—';

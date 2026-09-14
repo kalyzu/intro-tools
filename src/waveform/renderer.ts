@@ -13,6 +13,9 @@ export class WaveformRenderer {
   private trimEnd = 10;
   private markers: Marker[] = [];
   private selectedMarkerId: number | null = null;
+  private suggestedMarkers: Marker[] = [];
+  private suggestedVisible = true;
+  private selectedSuggestedMarkerId: number | null = null;
   private paddingLeft = 60;
   private paddingRight = 20;
 
@@ -20,6 +23,8 @@ export class WaveformRenderer {
   private isDraggingTrimEnd = false;
   private isDraggingMarker = false;
   private dragMarkerId: number | null = null;
+  private isDraggingSuggestedMarker = false;
+  private dragSuggestedMarkerId: number | null = null;
   private trimVisible = true;
   private markersVisible = true;
   private showBorder = false;
@@ -37,6 +42,8 @@ export class WaveformRenderer {
   private onMarkerAdd: ((time: number) => void) | null = null;
   private onMarkerMove: ((id: number, time: number) => void) | null = null;
   private onMarkerSelect: ((id: number | null) => void) | null = null;
+  private onSuggestedMarkerMove: ((id: number, time: number) => void) | null = null;
+  private onSuggestedMarkerSelect: ((id: number | null) => void) | null = null;
   private onSeek: ((time: number) => void) | null = null;
   private onZoomRequest: ((centerTime: number, factor: number, frac: number) => void) | null = null;
   private onPanRequest: ((delta: number) => void) | null = null;
@@ -98,6 +105,14 @@ export class WaveformRenderer {
     this.onMarkerAdd = onAdd;
     this.onMarkerMove = onMove;
     this.onMarkerSelect = onSelect;
+  }
+
+  setSuggestedMarkerCallbacks(
+    onMove: (id: number, time: number) => void,
+    onSelect: (id: number | null) => void
+  ): void {
+    this.onSuggestedMarkerMove = onMove;
+    this.onSuggestedMarkerSelect = onSelect;
   }
 
   setSeekCallback(cb: (time: number) => void): void {
@@ -241,6 +256,16 @@ export class WaveformRenderer {
     this.render();
   }
 
+  setSuggestedMarkers(markers: Marker[]): void {
+    this.suggestedMarkers = markers;
+    this.render();
+  }
+
+  setSuggestedVisible(visible: boolean): void {
+    this.suggestedVisible = visible;
+    this.render();
+  }
+
   setShowBorder(show: boolean): void {
     this.showBorder = show;
     this.render();
@@ -253,6 +278,13 @@ export class WaveformRenderer {
 
   setSelectedMarker(id: number | null): void {
     this.selectedMarkerId = id;
+    if (id !== null) this.selectedSuggestedMarkerId = null;
+    this.render();
+  }
+
+  setSelectedSuggestedMarker(id: number | null): void {
+    this.selectedSuggestedMarkerId = id;
+    if (id !== null) this.selectedMarkerId = null;
     this.render();
   }
 
@@ -329,15 +361,47 @@ export class WaveformRenderer {
     return null;
   }
 
+  private findSuggestedMarkerAt(coords: { x: number; y: number }): number | null {
+    if (!this.suggestedVisible) return null;
+    const hitRadius = 10 * (window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    const h = rect.height * dpr;
+    const markerY = h * 0.15;
+    for (const m of this.suggestedMarkers) {
+      const mx = this.timeToX(m.time);
+      if (Math.abs(coords.x - mx) < hitRadius && Math.abs(coords.y - markerY) < hitRadius * 2) {
+        return m.id;
+      }
+    }
+    return null;
+  }
+
   private onMouseDown(e: MouseEvent): void {
     if (e.button !== 0) return;
     const coords = this.getCanvasCoords(e);
+
+    const suggestedId = this.findSuggestedMarkerAt(coords);
+    if (suggestedId !== null) {
+      this.isDraggingSuggestedMarker = true;
+      this.dragSuggestedMarkerId = suggestedId;
+      this.selectedSuggestedMarkerId = suggestedId;
+      this.selectedMarkerId = null;
+      this.onSuggestedMarkerSelect?.(suggestedId);
+      this.onMarkerSelect?.(null);
+      this.render();
+      return;
+    }
 
     const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
     if (markerId !== null) {
       this.isDraggingMarker = true;
       this.dragMarkerId = markerId;
+      this.selectedMarkerId = markerId;
+      this.selectedSuggestedMarkerId = null;
       this.onMarkerSelect?.(markerId);
+      this.onSuggestedMarkerSelect?.(null);
+      this.render();
       return;
     }
 
@@ -351,7 +415,12 @@ export class WaveformRenderer {
       return;
     }
 
+    // Clicked empty - deselect both
+    this.selectedMarkerId = null;
+    this.selectedSuggestedMarkerId = null;
     this.onMarkerSelect?.(null);
+    this.onSuggestedMarkerSelect?.(null);
+    this.render();
 
     const time = this.xToTime(coords.x);
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
@@ -410,6 +479,13 @@ export class WaveformRenderer {
     const coords = this.getCanvasCoords(e);
     this.hoverX = coords.x;
 
+    if (this.isDraggingSuggestedMarker && this.dragSuggestedMarkerId !== null) {
+      const time = this.xToTime(coords.x);
+      const clamped = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, time));
+      this.onSuggestedMarkerMove?.(this.dragSuggestedMarkerId, clamped);
+      return;
+    }
+
     if (this.isDraggingMarker && this.dragMarkerId !== null) {
       const time = this.xToTime(coords.x);
       const clamped = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, time));
@@ -438,8 +514,9 @@ export class WaveformRenderer {
 
     const handle = this.trimVisible ? this.findTrimHandleAt(coords) : null;
     const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
+    const suggestedId = this.findSuggestedMarkerAt(coords);
 
-    if (handle || markerId !== null) {
+    if (handle || markerId !== null || suggestedId !== null) {
       this.canvas.style.cursor = 'ew-resize';
     } else {
       this.canvas.style.cursor = 'crosshair';
@@ -452,6 +529,8 @@ export class WaveformRenderer {
     this.isDraggingTrimEnd = false;
     this.isDraggingMarker = false;
     this.dragMarkerId = null;
+    this.isDraggingSuggestedMarker = false;
+    this.dragSuggestedMarkerId = null;
   }
 
   private onMouseLeave(): void {
@@ -465,7 +544,8 @@ export class WaveformRenderer {
     const coords = this.getCanvasCoords(e);
     this.clearPendingSeek();
     const markerId = this.findMarkerAt(coords);
-    if (markerId !== null) return;
+    const suggestedId = this.findSuggestedMarkerAt(coords);
+    if (markerId !== null || suggestedId !== null) return;
 
     const time = this.xToTime(coords.x);
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
@@ -625,6 +705,46 @@ export class WaveformRenderer {
     const ctx = this.ctx;
     const dpr = window.devicePixelRatio || 1;
     const markerY = h * 0.15;
+
+    // Draw suggested (green) first, so yellow appears on top if overlapping
+    if (this.suggestedVisible) {
+      for (const m of this.suggestedMarkers) {
+        const mx = this.timeToX(m.time);
+        const isSelected = m.id === this.selectedSuggestedMarkerId;
+
+        ctx.strokeStyle = isSelected ? '#ff6b6b' : '#4caf50';
+        ctx.lineWidth = isSelected ? 2 : 1.5;
+        ctx.setLineDash(isSelected ? [] : [4 * dpr, 4 * dpr]);
+        ctx.beginPath();
+        ctx.moveTo(mx, 0);
+        ctx.lineTo(mx, h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = isSelected ? '#ff6b6b' : '#4caf50';
+        ctx.beginPath();
+        // Diamond shape for suggested to distinguish from yellow circles
+        const r = isSelected ? 5 * dpr : 4 * dpr;
+        ctx.moveTo(mx, markerY - r);
+        ctx.lineTo(mx + r, markerY);
+        ctx.lineTo(mx, markerY + r);
+        ctx.lineTo(mx - r, markerY);
+        ctx.closePath();
+        ctx.fill();
+
+        if (isSelected) {
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = isSelected ? '#ff6b6b' : '#4caf50';
+        ctx.font = `bold ${10 * dpr}px "SF Mono", "Fira Code", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(m.time.toFixed(2) + 's', mx, markerY - 6 * dpr);
+      }
+    }
 
     for (const m of this.markers) {
       const mx = this.timeToX(m.time);

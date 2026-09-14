@@ -296,6 +296,23 @@ body {
   flex: 1;
 }
 
+.suggested-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.suggested-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 4px;
+}
+
 .ref-waveform-section {
   flex: 0.35;
   border-bottom: 1px solid var(--border);
