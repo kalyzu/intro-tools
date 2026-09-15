@@ -75,6 +75,22 @@ export async function renderOffline(
 
   const renderedBuffer = await offlineCtx.startRendering();
 
+  // De-click: apply short linear fades to avoid pop from hard cut at trim boundaries
+  // and from filter state at start/end. Only needed for offline export; playback's
+  // real-time context masks the transient, but we keep it consistent.
+  const fadeSec = 0.005; // 5ms
+  const fadeSamples = Math.min(Math.floor(fadeSec * sampleRate), Math.floor(renderedBuffer.length / 2));
+  if (fadeSamples > 0) {
+    for (let ch = 0; ch < renderedBuffer.numberOfChannels; ch++) {
+      const data = renderedBuffer.getChannelData(ch);
+      for (let i = 0; i < fadeSamples; i++) {
+        const g = i / fadeSamples;
+        data[i] *= g;
+        data[data.length - 1 - i] *= g;
+      }
+    }
+  }
+
   if (onProgress) {
     onProgress({ progress: 1 });
   }

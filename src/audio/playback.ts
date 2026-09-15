@@ -22,6 +22,7 @@ export class PlaybackEngine {
   private analyser: AnalyserNode | null = null;
   private volumeGain: GainNode | null = null;
   private outputGain: GainNode | null = null;
+  private fadeGain: GainNode | null = null;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
   private startTime = 0;
@@ -144,6 +145,7 @@ export class PlaybackEngine {
 
     this.scheduleFilterAutomation(clampedOffset);
     this.scheduleVolumeAutomation(clampedOffset);
+    this.scheduleFadeAutomation(clampedOffset);
 
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
@@ -180,6 +182,7 @@ export class PlaybackEngine {
 
     this.scheduleFilterAutomation(clampedOffset);
     this.scheduleVolumeAutomation(clampedOffset);
+    this.scheduleFadeAutomation(clampedOffset);
 
     this.state = 'playing';
     this.callbacks.onStateChange(this.state);
@@ -256,11 +259,18 @@ export class PlaybackEngine {
     try {
       this.outputGain?.disconnect();
     } catch {}
+    try {
+      this.fadeGain?.disconnect();
+    } catch {}
+    try {
+      this.fadeGain?.gain.cancelScheduledValues(0);
+    } catch {}
     this.source = null;
     this.filters = [];
     this.analyser = null;
     this.volumeGain = null;
     this.outputGain = null;
+    this.fadeGain = null;
   }
 
   private buildGraph(ctx: AudioContext): void {
@@ -282,6 +292,10 @@ export class PlaybackEngine {
     outputGain.gain.value = 0.75; // -2.5 dB ≈ 0.75, approx -2 to -3 dB range
     this.outputGain = outputGain;
 
+    const fadeGain = ctx.createGain();
+    fadeGain.gain.value = 1;
+    this.fadeGain = fadeGain;
+
     if (this.filterEnabled) {
       this.filters = createFilterChain(ctx, this.filterSlope);
       source.connect(this.filters[0]);
@@ -292,7 +306,8 @@ export class PlaybackEngine {
     }
     volumeGain.connect(analyser);
     analyser.connect(outputGain);
-    outputGain.connect(ctx.destination);
+    outputGain.connect(fadeGain);
+    fadeGain.connect(ctx.destination);
   }
 
   private scheduleFilterAutomation(bufStartTime: number): void {
@@ -350,6 +365,25 @@ export class PlaybackEngine {
     if (this.state !== 'playing' || !this.audioContext || !this.volumeGain) return;
     const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
     this.scheduleVolumeAutomation(bufTime);
+  }
+
+  private scheduleFadeAutomation(bufStartTime: number): void {
+    if (!this.audioContext || !this.fadeGain) return;
+    const acNow = this.audioContext.currentTime;
+    const fadeSec = 0.005;
+    const trimDuration = this.trimEnd - Math.max(this.trimStart, bufStartTime);
+    // Start at 0, ramp to 1 over fadeSec, hold, then ramp to 0 at end
+    this.fadeGain.gain.cancelScheduledValues(0);
+    this.fadeGain.gain.setValueAtTime(0, acNow);
+    this.fadeGain.gain.linearRampToValueAtTime(1, acNow + fadeSec);
+    if (trimDuration > fadeSec * 2) {
+      this.fadeGain.gain.setValueAtTime(1, acNow + trimDuration - fadeSec);
+      this.fadeGain.gain.linearRampToValueAtTime(0, acNow + trimDuration);
+    } else {
+      // Very short clip: just stay at 1 and ramp out at end
+      this.fadeGain.gain.setValueAtTime(1, acNow + fadeSec);
+      this.fadeGain.gain.linearRampToValueAtTime(0, acNow + trimDuration);
+    }
   }
 
   private startUpdateLoop(): void {
