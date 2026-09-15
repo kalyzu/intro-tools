@@ -1,4 +1,10 @@
-# MGMC
+# Intro tools
+
+A collection of tools for motion graphics.
+
+There is currently 1 tool:
+
+### MGMC
 
 Motion Graphics Music Cutter (MGMC) is a small in-browser tool to cut music for motion graphics. It runs entirely locally — your audio never leaves your machine.
 
@@ -21,6 +27,7 @@ Draw a cutoff automation curve over time with:
 - Right-click to toggle between smooth and linear interpolation
 - Double-click to add new points
 - Delete/Backspace to remove selected points
+- Scroll to zoom
 - 12, 24, or 48 dB/octave slope options
 
 The filter uses Web Audio API with overlapping exponential ramps to eliminate clicks and pops during playback and export.

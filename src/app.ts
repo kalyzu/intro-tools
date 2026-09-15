@@ -1,3 +1,4 @@
+import './style.css';
 import type { AutomationPoint, Marker, ViewState } from './automation/model';
 import { sortPoints, clampTime } from './automation/model';
 import { createDefaultAutomation } from './automation/defaults';
