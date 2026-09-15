@@ -27,6 +27,7 @@ export class AutomationEditor {
   private duration = 10;
   private view: ViewState = { viewStart: 0, viewEnd: 10 };
   private selectedIndex: number | null = null;
+  private selectedIndices: Set<number> = new Set();
   private isDraggingPoint = false;
   private dragIndex = -1;
   private dragOffsetX = 0;
@@ -34,6 +35,11 @@ export class AutomationEditor {
   private dragStartTime = 0;
   private dragStartFreq = 0;
   private dragStartControlFreq: number | null = null;
+  private isBoxSelecting = false;
+  private boxStart: { x: number; y: number } | null = null;
+  private boxEnd: { x: number; y: number } | null = null;
+  private boxStartSelectedIndices: Set<number> = new Set();
+  private dragStartPositions: Map<number, { time: number; frequency: number }> = new Map();
   private playheadTime = 0;
   private homeTime = 0;
   private callbacks: AutomationEditorCallbacks;
@@ -82,10 +88,18 @@ export class AutomationEditor {
     this.canvas.addEventListener('contextmenu', this.onContextMenu.bind(this));
     this.canvas.addEventListener('wheel', this.onWheel.bind(this));
 
+    window.addEventListener('mouseup', this.onWindowMouseUp.bind(this));
+    window.addEventListener('mousemove', this.onWindowMouseMove.bind(this));
+
     document.addEventListener('keydown', (e) => {
       this.isShiftDown = e.shiftKey;
       if (!this.active) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (this.selectedIndices.size > 0) {
+          e.preventDefault();
+          this.deleteSelected();
+          return;
+        }
         if (this.selectedIndex !== null) {
           e.preventDefault();
           this.deletePoint(this.selectedIndex);
@@ -171,11 +185,22 @@ export class AutomationEditor {
     return this.selectedIndex;
   }
 
+  getSelectedIndices(): number[] {
+    return Array.from(this.selectedIndices);
+  }
+
   clearSelection(): void {
-    if (this.selectedIndex !== null) {
+    if (this.selectedIndex !== null || this.selectedIndices.size > 0) {
       this.selectedIndex = null;
+      this.selectedIndices.clear();
       this.render();
     }
+  }
+
+  private setSelection(indices: number[]): void {
+    this.selectedIndices = new Set(indices);
+    this.selectedIndex = indices.length === 1 ? indices[0] : indices.length > 0 ? indices[0] : null;
+    // Keep selectedIndex as first for backward compat, but also maintain set
   }
 
   private getGraphBounds(): { x: number; y: number; w: number; h: number } {
@@ -295,18 +320,69 @@ export class AutomationEditor {
 
     const idx = this.findPointAt(coords);
     if (idx >= 0) {
-      this.selectedIndex = idx;
-      this.isDraggingPoint = true;
-      this.dragIndex = idx;
-      this.dragStartTime = this.points[idx].time;
-      this.dragStartFreq = this.points[idx].frequency;
-      const px = this.timeToX(this.points[idx].time);
-      const py = this.freqToY(this.points[idx].frequency);
-      this.dragOffsetX = coords.x - px;
-      this.dragOffsetY = coords.y - py;
-      this.callbacks.onPointSelect(idx);
-      this.render();
-      return;
+      const isShift = e.shiftKey || this.isShiftDown;
+      if (isShift) {
+        // Toggle selection
+        if (this.selectedIndices.has(idx)) {
+          this.selectedIndices.delete(idx);
+        } else {
+          this.selectedIndices.add(idx);
+        }
+        this.selectedIndex = this.selectedIndices.size === 1 ? Array.from(this.selectedIndices)[0] : null;
+        // If we just added, make it the drag index for potential move
+        if (this.selectedIndices.has(idx)) {
+          this.isDraggingPoint = true;
+          this.dragIndex = idx;
+          // Capture start positions for all selected
+          this.dragStartPositions.clear();
+          for (const i of this.selectedIndices) {
+            this.dragStartPositions.set(i, { time: this.points[i].time, frequency: this.points[i].frequency });
+          }
+          const px = this.timeToX(this.points[idx].time);
+          const py = this.freqToY(this.points[idx].frequency);
+          this.dragOffsetX = coords.x - px;
+          this.dragOffsetY = coords.y - py;
+        } else {
+          this.isDraggingPoint = false;
+          this.dragIndex = -1;
+        }
+        this.callbacks.onPointSelect(this.selectedIndex);
+        this.render();
+        return;
+      } else {
+        // No shift: if clicked point is already in multi-selection, keep the set and drag all
+        if (this.selectedIndices.has(idx) && this.selectedIndices.size > 1) {
+          this.selectedIndex = idx;
+          this.isDraggingPoint = true;
+          this.dragIndex = idx;
+          this.dragStartPositions.clear();
+          for (const i of this.selectedIndices) {
+            this.dragStartPositions.set(i, { time: this.points[i].time, frequency: this.points[i].frequency });
+          }
+          const px = this.timeToX(this.points[idx].time);
+          const py = this.freqToY(this.points[idx].frequency);
+          this.dragOffsetX = coords.x - px;
+          this.dragOffsetY = coords.y - py;
+          this.callbacks.onPointSelect(idx);
+          this.render();
+          return;
+        }
+        // Otherwise single select
+        this.setSelection([idx]);
+        this.isDraggingPoint = true;
+        this.dragIndex = idx;
+        this.dragStartTime = this.points[idx].time;
+        this.dragStartFreq = this.points[idx].frequency;
+        this.dragStartPositions.clear();
+        this.dragStartPositions.set(idx, { time: this.points[idx].time, frequency: this.points[idx].frequency });
+        const px = this.timeToX(this.points[idx].time);
+        const py = this.freqToY(this.points[idx].frequency);
+        this.dragOffsetX = coords.x - px;
+        this.dragOffsetY = coords.y - py;
+        this.callbacks.onPointSelect(idx);
+        this.render();
+        return;
+      }
     }
 
     const segIdx = this.findSegmentAt(coords);
@@ -330,19 +406,53 @@ export class AutomationEditor {
       return;
     }
 
-    this.selectedIndex = null;
-    this.callbacks.onPointSelect(null);
-    this.isDraggingPoint = false;
-
-    const time = this.xToTime(coords.x);
-    if (time >= this.view.viewStart && time <= this.view.viewEnd) {
-      this.callbacks.onSeek(time);
+    // Empty space: start box selection (or seek if just click)
+    const isShiftEmpty = e.shiftKey || this.isShiftDown;
+    this.boxStartSelectedIndices = new Set(this.selectedIndices);
+    if (!isShiftEmpty) {
+      this.setSelection([]);
+      this.callbacks.onPointSelect(null);
     }
+    this.isBoxSelecting = true;
+    const b0 = this.getGraphBounds();
+    const clampedStartX = Math.max(b0.x, Math.min(b0.x + b0.w, coords.x));
+    const clampedStartY = Math.max(b0.y, Math.min(b0.y + b0.h, coords.y));
+    this.boxStart = { x: clampedStartX, y: clampedStartY };
+    this.boxEnd = { x: clampedStartX, y: clampedStartY };
+    // Don't seek immediately; seek will happen on mouseup if box was tiny (click)
     this.render();
   }
 
   private onMouseMove(e: MouseEvent): void {
     const coords = this.getCanvasCoords(e);
+
+    if (this.isBoxSelecting && this.boxStart && this.boxEnd) {
+      const b = this.getGraphBounds();
+      const clampedX = Math.max(b.x, Math.min(b.x + b.w, coords.x));
+      const clampedY = Math.max(b.y, Math.min(b.y + b.h, coords.y));
+      this.boxEnd = { x: clampedX, y: clampedY };
+      const xMin = Math.min(this.boxStart.x, this.boxEnd.x);
+      const xMax = Math.max(this.boxStart.x, this.boxEnd.x);
+      const yMin = Math.min(this.boxStart.y, this.boxEnd.y);
+      const yMax = Math.max(this.boxStart.y, this.boxEnd.y);
+      const isShift = e.shiftKey || this.isShiftDown;
+      const inside = new Set<number>();
+      for (let i = 0; i < this.points.length; i++) {
+        const px = this.timeToX(this.points[i].time);
+        const py = this.freqToY(this.points[i].frequency);
+        if (px >= xMin && px <= xMax && py >= yMin && py <= yMax) {
+          inside.add(i);
+        }
+      }
+      if (isShift) {
+        this.selectedIndices = new Set<number>([...this.boxStartSelectedIndices, ...inside]);
+      } else {
+        this.selectedIndices = inside;
+      }
+      this.selectedIndex = this.selectedIndices.size === 1 ? Array.from(this.selectedIndices)[0] : null;
+      this.render();
+      return;
+    }
 
     if (this.isDraggingControl && this.controlDragSegIndex >= 0) {
       const i = this.controlDragSegIndex;
@@ -377,6 +487,67 @@ export class AutomationEditor {
 
       newFreq = clampFrequency(newFreq);
       newTime = clampTime(newTime, this.duration);
+
+      // If multi-selected, move all selected together
+      if (this.selectedIndices.size > 1 && this.selectedIndices.has(this.dragIndex)) {
+        const dragStart = this.dragStartPositions.get(this.dragIndex);
+        if (!dragStart) return;
+        const deltaTime = newTime - dragStart.time;
+        const deltaLogFreq = Math.log(newFreq) - Math.log(dragStart.frequency);
+        // Apply delta to all selected, sorted to avoid crossing
+        const sortedIndices = Array.from(this.selectedIndices).sort((a, b) => a - b);
+        // Check bounds for all
+        let canMove = true;
+        for (const idx of sortedIndices) {
+          const startPos = this.dragStartPositions.get(idx);
+          if (!startPos) continue;
+          let t = startPos.time + deltaTime;
+          t = clampTime(t, this.duration);
+          // Check neighbour constraints for each
+          // Find nearest unselected neighbours
+          let prevIdx = -1;
+          for (let j = idx - 1; j >= 0; j--) {
+            if (!this.selectedIndices.has(j)) { prevIdx = j; break; }
+          }
+          let nextIdx = -1;
+          for (let j = idx + 1; j < this.points.length; j++) {
+            if (!this.selectedIndices.has(j)) { nextIdx = j; break; }
+          }
+          if (prevIdx >= 0) {
+            const prevTime = this.points[prevIdx].time;
+            if (t <= prevTime + 0.01) { canMove = false; break; }
+          }
+          if (nextIdx >= 0) {
+            const nextTime = this.points[nextIdx].time;
+            if (t >= nextTime - 0.01) { canMove = false; break; }
+          }
+        }
+        if (!canMove) return;
+        for (const idx of sortedIndices) {
+          const startPos = this.dragStartPositions.get(idx)!;
+          let t = startPos.time + deltaTime;
+          let f = Math.exp(Math.log(startPos.frequency) + deltaLogFreq);
+          t = clampTime(t, this.duration);
+          f = clampFrequency(f);
+          // Clamp to neighbours
+          let prevIdx = -1;
+          for (let j = idx - 1; j >= 0; j--) {
+            if (!this.selectedIndices.has(j)) { prevIdx = j; break; }
+          }
+          let nextIdx = -1;
+          for (let j = idx + 1; j < this.points.length; j++) {
+            if (!this.selectedIndices.has(j)) { nextIdx = j; break; }
+          }
+          if (prevIdx >= 0) t = Math.max(t, this.points[prevIdx].time + 0.01);
+          if (nextIdx >= 0) t = Math.min(t, this.points[nextIdx].time - 0.01);
+          this.points[idx].time = t;
+          this.points[idx].frequency = f;
+        }
+        this.showTooltip(newTime, newFreq, e.clientX, e.clientY);
+        this.callbacks.onPointsChange([...this.points]);
+        this.render();
+        return;
+      }
 
       if (this.dragIndex > 0) {
         const prevTime = this.points[this.dragIndex - 1].time;
@@ -418,6 +589,29 @@ export class AutomationEditor {
   }
 
   private onMouseUp(): void {
+    if (this.isBoxSelecting) {
+      const start = this.boxStart;
+      const end = this.boxEnd;
+      const isTinyClick = start && end && Math.abs(end.x - start.x) < 5 && Math.abs(end.y - start.y) < 5;
+      this.isBoxSelecting = false;
+      this.boxStart = null;
+      this.boxEnd = null;
+      this.boxStartSelectedIndices.clear();
+      if (isTinyClick && start) {
+        const time = this.xToTime(start.x);
+        if (time >= this.view.viewStart && time <= this.view.viewEnd) {
+          this.callbacks.onSeek(time);
+        }
+      } else {
+        if (this.selectedIndices.size > 0) {
+          this.callbacks.onPointSelect(this.selectedIndex);
+        } else {
+          this.callbacks.onPointSelect(null);
+        }
+      }
+      this.render();
+      return;
+    }
     const wasDraggingControl = this.isDraggingControl;
     const wasDraggingPoint = this.isDraggingPoint;
     let didMove = false;
@@ -432,13 +626,27 @@ export class AutomationEditor {
       this.hideTooltip();
     }
     if (this.isDraggingPoint) {
-      const idx = this.dragIndex;
-      if (idx >= 0 && idx < this.points.length) {
-        const p = this.points[idx];
-        if (p.time !== this.dragStartTime || p.frequency !== this.dragStartFreq) didMove = true;
+      // For multi-drag, check if any selected moved
+      if (this.selectedIndices.size > 1) {
+        for (const idx of this.selectedIndices) {
+          const startPos = this.dragStartPositions.get(idx);
+          const cur = this.points[idx];
+          if (!startPos) continue;
+          if (cur.time !== startPos.time || cur.frequency !== startPos.frequency) {
+            didMove = true;
+            break;
+          }
+        }
+      } else {
+        const idx = this.dragIndex;
+        if (idx >= 0 && idx < this.points.length) {
+          const p = this.points[idx];
+          if (p.time !== this.dragStartTime || p.frequency !== this.dragStartFreq) didMove = true;
+        }
       }
       this.isDraggingPoint = false;
       this.dragIndex = -1;
+      this.dragStartPositions.clear();
       this.hideTooltip();
     }
     if (wasDraggingControl || wasDraggingPoint) {
@@ -451,17 +659,26 @@ export class AutomationEditor {
     }
   }
 
+  private onWindowMouseMove(e: MouseEvent): void {
+    if (this.isDraggingPoint || this.isDraggingControl || this.isBoxSelecting) {
+      if (e.target === this.canvas) return;
+      this.onMouseMove(e);
+    }
+  }
+
+  private onWindowMouseUp(e: MouseEvent): void {
+    if (this.isBoxSelecting || this.isDraggingPoint || this.isDraggingControl) {
+      if (e.target === this.canvas) return;
+      this.onMouseUp();
+    }
+  }
+
   private onMouseLeave(): void {
     this.hoveredSegment = -1;
-    if (this.isDraggingControl) {
-      this.isDraggingControl = false;
-      this.controlDragSegIndex = -1;
-      this.hideTooltip();
-    }
-    if (this.isDraggingPoint) {
-      this.isDraggingPoint = false;
-      this.dragIndex = -1;
-      this.hideTooltip();
+    // Box/drag should persist when mouse leaves canvas — only mouse up ends it, capped at graph bounds
+    if (this.isBoxSelecting || this.isDraggingPoint || this.isDraggingControl) {
+      this.render();
+      return;
     }
     this.render();
   }
@@ -520,9 +737,36 @@ export class AutomationEditor {
     if (index < 0 || index >= this.points.length) return;
     this.points.splice(index, 1);
     this.selectedIndex = null;
+    this.selectedIndices.clear();
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(null);
     this.onAfterChange?.();
+    this.render();
+  }
+
+  deleteSelected(): void {
+    if (this.selectedIndices.size === 0) {
+      if (this.selectedIndex !== null) {
+        this.deletePoint(this.selectedIndex);
+      }
+      return;
+    }
+    if (this.points.length - this.selectedIndices.size < 2) return;
+    this.onAfterChange?.();
+    // Delete in descending order to keep indices valid
+    const toDelete = Array.from(this.selectedIndices).sort((a, b) => b - a);
+    for (const idx of toDelete) {
+      if (idx >= 0 && idx < this.points.length) {
+        this.points.splice(idx, 1);
+      }
+    }
+    this.selectedIndices.clear();
+    this.selectedIndex = null;
+    this.callbacks.onPointsChange([...this.points]);
+    this.callbacks.onPointSelect(null);
+    // onAfterChange already called before, but need to push final state
+    // Actually we called it before, but we need to ensure the new state is pushed
+    // The onAfterChange at deletePoint already handles, but for bulk we do it here
     this.render();
   }
 
@@ -574,6 +818,7 @@ export class AutomationEditor {
     this.drawCurve(b);
     this.drawControlHandles(b);
     this.drawPoints(b);
+    this.drawSelectionBox(b);
     this.drawHomeLine(b);
     this.drawPlayhead(b);
 
@@ -732,7 +977,7 @@ export class AutomationEditor {
       const p = this.points[i];
       const x = this.timeToX(p.time);
       const y = this.freqToY(p.frequency);
-      const isSelected = i === this.selectedIndex;
+      const isSelected = this.selectedIndices.has(i) || i === this.selectedIndex;
 
       ctx.beginPath();
       ctx.arc(x, y, isSelected ? 7 : 5, 0, Math.PI * 2);
@@ -745,6 +990,23 @@ export class AutomationEditor {
         ctx.stroke();
       }
     }
+  }
+
+  private drawSelectionBox(_b: { x: number; y: number; w: number; h: number }): void {
+    if (!this.isBoxSelecting || !this.boxStart || !this.boxEnd) return;
+    const xMin = Math.min(this.boxStart.x, this.boxEnd.x);
+    const xMax = Math.max(this.boxStart.x, this.boxEnd.x);
+    const yMin = Math.min(this.boxStart.y, this.boxEnd.y);
+    const yMax = Math.max(this.boxStart.y, this.boxEnd.y);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(79, 195, 247, 0.9)';
+    ctx.fillStyle = 'rgba(79, 195, 247, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.fillRect(xMin, yMin, xMax - xMin, yMax - yMin);
+    ctx.strokeRect(xMin, yMin, xMax - xMin, yMax - yMin);
+    ctx.restore();
   }
 
   private drawPlayhead(b: { x: number; y: number; w: number; h: number }): void {

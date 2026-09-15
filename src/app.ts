@@ -290,7 +290,31 @@ class LowPassEditor {
       }
 
       if (this.mode === 'markers' && (e.key === 'Delete' || e.key === 'Backspace')) {
-        if (this.selectedSuggestedMarkerId !== null) {
+        const suggestedIds = this.markerWaveform?.getSelectedSuggestedIds?.() ?? [];
+        const markerIds = this.markerWaveform?.getSelectedMarkerIds?.() ?? [];
+        if (suggestedIds.length > 0) {
+          e.preventDefault();
+          // Delete all selected suggested (green) in one undo
+          const toDelete = new Set(suggestedIds);
+          this.suggestedMarkers = this.suggestedMarkers.filter(m => !toDelete.has(m.id));
+          this.selectedSuggestedMarkerId = null;
+          this.markerWaveform?.setSuggestedMarkers(this.suggestedMarkers);
+          this.markerWaveform?.setSelectedSuggestedMarker(null);
+          this.updateMarkerDisplay();
+          this.updateExportButtons();
+          this.updateSuggestedButtons();
+          this.pushMarkersHistory();
+        } else if (markerIds.length > 0) {
+          e.preventDefault();
+          const toDelete = new Set(markerIds);
+          this.markers = this.markers.filter(m => !toDelete.has(m.id));
+          this.selectedMarkerId = null;
+          this.markerWaveform?.setMarkers(this.markers);
+          this.markerWaveform?.setSelectedMarker(null);
+          this.updateMarkerDisplay();
+          this.updateExportButtons();
+          this.pushMarkersHistory();
+        } else if (this.selectedSuggestedMarkerId !== null) {
           e.preventDefault();
           this.deleteSuggestedMarker(this.selectedSuggestedMarkerId);
         } else if (this.selectedMarkerId !== null) {

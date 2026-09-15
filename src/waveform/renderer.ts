@@ -13,9 +13,18 @@ export class WaveformRenderer {
   private trimEnd = 10;
   private markers: Marker[] = [];
   private selectedMarkerId: number | null = null;
+  private selectedMarkerIds: Set<number> = new Set();
   private suggestedMarkers: Marker[] = [];
   private suggestedVisible = true;
   private selectedSuggestedMarkerId: number | null = null;
+  private selectedSuggestedIds: Set<number> = new Set();
+  private isBoxSelecting = false;
+  private boxStart: { x: number; y: number } | null = null;
+  private boxEnd: { x: number; y: number } | null = null;
+  private boxStartSelectedMarkerIds: Set<number> = new Set();
+  private boxStartSelectedSuggestedIds: Set<number> = new Set();
+  private dragStartPositions: Map<number, number> = new Map(); // id -> time
+  private dragStartSuggestedPositions: Map<number, number> = new Map();
   private paddingLeft = 60;
   private paddingRight = 20;
 
@@ -78,6 +87,24 @@ export class WaveformRenderer {
     this.canvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
     this.canvas.addEventListener('dblclick', this.onDoubleClick.bind(this));
     this.canvas.addEventListener('wheel', this.onWheel.bind(this));
+    // Listen on window for mouseup/mousemove to handle drags that leave the canvas
+    window.addEventListener('mouseup', this.onWindowMouseUp.bind(this));
+    window.addEventListener('mousemove', this.onWindowMouseMove.bind(this));
+  }
+
+  private onWindowMouseMove(e: MouseEvent): void {
+    if (this.isDraggingMarker || this.isDraggingSuggestedMarker || this.isDraggingTrimStart || this.isDraggingTrimEnd || this.isBoxSelecting) {
+      // Avoid double-handling when event already processed by canvas listener
+      if (e.target === this.canvas) return;
+      this.onMouseMove(e);
+    }
+  }
+
+  private onWindowMouseUp(e: MouseEvent): void {
+    if (this.isBoxSelecting || this.isDraggingMarker || this.isDraggingSuggestedMarker || this.isDraggingTrimStart || this.isDraggingTrimEnd) {
+      if (e.target === this.canvas) return;
+      this.onMouseUp(e);
+    }
   }
 
   setZoomRequestCallback(cb: (centerTime: number, factor: number, frac: number) => void): void {
@@ -292,13 +319,56 @@ export class WaveformRenderer {
 
   setSelectedMarker(id: number | null): void {
     this.selectedMarkerId = id;
-    if (id !== null) this.selectedSuggestedMarkerId = null;
+    if (id !== null) {
+      this.selectedSuggestedMarkerId = null;
+      this.selectedSuggestedIds.clear();
+      this.selectedMarkerIds = new Set([id]);
+    } else {
+      this.selectedMarkerIds.clear();
+    }
     this.render();
   }
 
   setSelectedSuggestedMarker(id: number | null): void {
     this.selectedSuggestedMarkerId = id;
-    if (id !== null) this.selectedMarkerId = null;
+    if (id !== null) {
+      this.selectedMarkerId = null;
+      this.selectedMarkerIds.clear();
+      this.selectedSuggestedIds = new Set([id]);
+    } else {
+      this.selectedSuggestedIds.clear();
+    }
+    this.render();
+  }
+
+  setSelectedMarkers(ids: number[]): void {
+    this.selectedMarkerIds = new Set(ids);
+    this.selectedMarkerId = ids.length === 1 ? ids[0] : null;
+    if (ids.length > 0) {
+      this.selectedSuggestedIds.clear();
+      this.selectedSuggestedMarkerId = null;
+    }
+    this.render();
+  }
+
+  setSelectedSuggestedMarkers(ids: number[]): void {
+    this.selectedSuggestedIds = new Set(ids);
+    this.selectedSuggestedMarkerId = ids.length === 1 ? ids[0] : null;
+    if (ids.length > 0) {
+      this.selectedMarkerIds.clear();
+      this.selectedMarkerId = null;
+    }
+    this.render();
+  }
+
+  getSelectedMarkerIds(): number[] { return Array.from(this.selectedMarkerIds); }
+  getSelectedSuggestedIds(): number[] { return Array.from(this.selectedSuggestedIds); }
+
+  clearSelection(): void {
+    this.selectedMarkerId = null;
+    this.selectedMarkerIds.clear();
+    this.selectedSuggestedMarkerId = null;
+    this.selectedSuggestedIds.clear();
     this.render();
   }
 
@@ -397,11 +467,49 @@ export class WaveformRenderer {
 
     const suggestedId = this.findSuggestedMarkerAt(coords);
     if (suggestedId !== null) {
+      const isShift = (e as MouseEvent).shiftKey;
+      if (isShift) {
+        if (this.selectedSuggestedIds.has(suggestedId)) {
+          this.selectedSuggestedIds.delete(suggestedId);
+          this.selectedSuggestedMarkerId = this.selectedSuggestedIds.size === 1 ? Array.from(this.selectedSuggestedIds)[0] : null;
+        } else {
+          this.selectedSuggestedIds.add(suggestedId);
+          this.selectedSuggestedMarkerId = suggestedId;
+          this.selectedMarkerId = null;
+          this.selectedMarkerIds.clear();
+        }
+        this.onSuggestedMarkerSelect?.(this.selectedSuggestedMarkerId);
+        this.onMarkerSelect?.(null);
+        this.render();
+        return;
+      }
+      // If clicked suggested is already in multi-selection, keep set and drag all
+      if (this.selectedSuggestedIds.has(suggestedId) && this.selectedSuggestedIds.size > 1) {
+        this.selectedSuggestedMarkerId = suggestedId;
+        this.isDraggingSuggestedMarker = true;
+        this.dragSuggestedMarkerId = suggestedId;
+        this.dragStartSuggestedTime = this.suggestedMarkers.find(m => m.id === suggestedId)?.time ?? 0;
+        // Capture start positions for all selected
+        this.dragStartSuggestedPositions.clear();
+        for (const id of this.selectedSuggestedIds) {
+          const m = this.suggestedMarkers.find(x => x.id === id);
+          if (m) this.dragStartSuggestedPositions.set(id, m.time);
+        }
+        this.onBeforeChange?.();
+        this.render();
+        return;
+      }
+      // Single select
       this.onBeforeChange?.();
-      this.isDraggingSuggestedMarker = true;
-      this.dragSuggestedMarkerId = suggestedId;
+      this.selectedSuggestedIds = new Set([suggestedId]);
       this.selectedSuggestedMarkerId = suggestedId;
       this.selectedMarkerId = null;
+      this.selectedMarkerIds.clear();
+      this.isDraggingSuggestedMarker = true;
+      this.dragSuggestedMarkerId = suggestedId;
+      this.dragStartSuggestedTime = this.suggestedMarkers.find(m => m.id === suggestedId)?.time ?? 0;
+      this.dragStartSuggestedPositions.clear();
+      this.dragStartSuggestedPositions.set(suggestedId, this.dragStartSuggestedTime);
       this.onSuggestedMarkerSelect?.(suggestedId);
       this.onMarkerSelect?.(null);
       this.render();
@@ -410,11 +518,46 @@ export class WaveformRenderer {
 
     const markerId = this.markersVisible ? this.findMarkerAt(coords) : null;
     if (markerId !== null) {
+      const isShift = (e as MouseEvent).shiftKey;
+      if (isShift) {
+        if (this.selectedMarkerIds.has(markerId)) {
+          this.selectedMarkerIds.delete(markerId);
+          this.selectedMarkerId = this.selectedMarkerIds.size === 1 ? Array.from(this.selectedMarkerIds)[0] : null;
+        } else {
+          this.selectedMarkerIds.add(markerId);
+          this.selectedMarkerId = markerId;
+          this.selectedSuggestedIds.clear();
+          this.selectedSuggestedMarkerId = null;
+        }
+        this.onMarkerSelect?.(this.selectedMarkerId);
+        this.onSuggestedMarkerSelect?.(null);
+        this.render();
+        return;
+      }
+      if (this.selectedMarkerIds.has(markerId) && this.selectedMarkerIds.size > 1) {
+        this.selectedMarkerId = markerId;
+        this.isDraggingMarker = true;
+        this.dragMarkerId = markerId;
+        this.dragStartMarkerTime = this.markers.find(m => m.id === markerId)?.time ?? 0;
+        this.dragStartPositions.clear();
+        for (const id of this.selectedMarkerIds) {
+          const m = this.markers.find(x => x.id === id);
+          if (m) this.dragStartPositions.set(id, m.time);
+        }
+        this.onBeforeChange?.();
+        this.render();
+        return;
+      }
       this.onBeforeChange?.();
+      this.selectedMarkerIds = new Set([markerId]);
+      this.selectedMarkerId = markerId;
+      this.selectedSuggestedIds.clear();
+      this.selectedSuggestedMarkerId = null;
       this.isDraggingMarker = true;
       this.dragMarkerId = markerId;
-      this.selectedMarkerId = markerId;
-      this.selectedSuggestedMarkerId = null;
+      this.dragStartMarkerTime = this.markers.find(m => m.id === markerId)?.time ?? 0;
+      this.dragStartPositions.clear();
+      this.dragStartPositions.set(markerId, this.dragStartMarkerTime);
       this.onMarkerSelect?.(markerId);
       this.onSuggestedMarkerSelect?.(null);
       this.render();
@@ -424,22 +567,51 @@ export class WaveformRenderer {
     const handle = this.trimVisible ? this.findTrimHandleAt(coords) : null;
     if (handle === 'start') {
       this.onBeforeChange?.();
+      this.dragStartTrimStart = this.trimStart;
+      this.dragStartTrimEnd = this.trimEnd;
       this.isDraggingTrimStart = true;
       return;
     }
     if (handle === 'end') {
       this.onBeforeChange?.();
+      this.dragStartTrimStart = this.trimStart;
+      this.dragStartTrimEnd = this.trimEnd;
       this.isDraggingTrimEnd = true;
       return;
     }
 
-    // Clicked empty - deselect both
-    this.selectedMarkerId = null;
-    this.selectedSuggestedMarkerId = null;
-    this.onMarkerSelect?.(null);
-    this.onSuggestedMarkerSelect?.(null);
-    this.render();
+    // Clicked empty: box only on step 3 (marker waveform) — step 1 trim and step 2 ref should just seek
+    // Gated by markersVisible && !trimVisible so trim (both true) doesn't get a box
+    if (this.markersVisible && !this.trimVisible) {
+      const isShiftEmpty = (e as MouseEvent).shiftKey;
+      // Snapshot base selection for additive (shift) dragging
+      this.boxStartSelectedMarkerIds = new Set(this.selectedMarkerIds);
+      this.boxStartSelectedSuggestedIds = new Set(this.selectedSuggestedIds);
+      if (!isShiftEmpty) {
+        this.selectedMarkerId = null;
+        this.selectedMarkerIds.clear();
+        this.selectedSuggestedMarkerId = null;
+        this.selectedSuggestedIds.clear();
+        this.onMarkerSelect?.(null);
+        this.onSuggestedMarkerSelect?.(null);
+      }
+      this.isBoxSelecting = true;
+      const dpr2 = window.devicePixelRatio || 1;
+      const rect2 = this.canvas.getBoundingClientRect();
+      const w2 = rect2.width * dpr2;
+      const minX2 = this.paddingLeft * dpr2;
+      const maxX2 = w2 - this.paddingRight * dpr2;
+      const clampedStartX = Math.max(minX2, Math.min(maxX2, coords.x));
+      // For markers X-only, clamp X to graph, keep Y as is (but clamp Y to canvas for visual)
+      const clampedStartY = Math.max(0, Math.min(rect2.height * dpr2, coords.y));
+      this.boxStart = { x: clampedStartX, y: clampedStartY };
+      this.boxEnd = { x: clampedStartX, y: clampedStartY };
+      this.render();
+      // Don't seek immediately; seek will be handled on mouseup if box was tiny (click)
+      return;
+    }
 
+    // No box selection (trim/filter screens): seek directly
     const time = this.xToTime(coords.x);
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
       if (this.deferSeekToDoubleClick) {
@@ -448,6 +620,8 @@ export class WaveformRenderer {
         this.onSeek?.(time);
       }
     }
+    // Ensure deselected visuals if we cleared? Already cleared only for box mode
+    this.render();
   }
 
   private scheduleDeferredSeek(time: number): void {
@@ -497,17 +671,92 @@ export class WaveformRenderer {
     const coords = this.getCanvasCoords(e);
     this.hoverX = coords.x;
 
+    if (this.isBoxSelecting && this.boxStart && this.boxEnd) {
+      // Clamp box to graph bounds so selection doesn't disappear when mouse goes too far
+      // Waveform graph X is between paddingLeft and width-paddingRight; Y is X-only for markers.
+      const dpr = window.devicePixelRatio || 1;
+      const rect = this.canvas.getBoundingClientRect();
+      const w = rect.width * dpr;
+      const minX = this.paddingLeft * dpr;
+      const maxX = w - this.paddingRight * dpr;
+      const clampedX = Math.max(minX, Math.min(maxX, coords.x));
+      this.boxEnd = { x: clampedX, y: coords.y };
+      const xMin = Math.min(this.boxStart.x, this.boxEnd.x);
+      const xMax = Math.max(this.boxStart.x, this.boxEnd.x);
+      const isShift = (e as MouseEvent).shiftKey;
+      // Markers are vertical lines across full height — selection is X-only (ignore Y).
+      // This makes dragging anywhere vertically intuitive and fixes "buggy on step 3".
+      const insideMarkers = new Set<number>();
+      const insideSuggested = new Set<number>();
+      for (const m of this.markers) {
+        const mx = this.timeToX(m.time);
+        if (mx >= xMin && mx <= xMax) {
+          insideMarkers.add(m.id);
+        }
+      }
+      for (const m of this.suggestedMarkers) {
+        if (!this.suggestedVisible) continue;
+        const mx = this.timeToX(m.time);
+        if (mx >= xMin && mx <= xMax) {
+          insideSuggested.add(m.id);
+        }
+      }
+      if (isShift) {
+        // Additive: base snapshot ∪ currently inside (shrinking box correctly deselects)
+        this.selectedMarkerIds = new Set<number>([...this.boxStartSelectedMarkerIds, ...insideMarkers]);
+        this.selectedSuggestedIds = new Set<number>([...this.boxStartSelectedSuggestedIds, ...insideSuggested]);
+      } else {
+        this.selectedMarkerIds = insideMarkers;
+        this.selectedSuggestedIds = insideSuggested;
+      }
+      // Update single selected for backward compat (first in set)
+      this.selectedMarkerId = this.selectedMarkerIds.size === 1 ? Array.from(this.selectedMarkerIds)[0] : null;
+      this.selectedSuggestedMarkerId = this.selectedSuggestedIds.size === 1 ? Array.from(this.selectedSuggestedIds)[0] : null;
+      this.render();
+      return;
+    }
+
     if (this.isDraggingSuggestedMarker && this.dragSuggestedMarkerId !== null) {
       const time = this.xToTime(coords.x);
       const clamped = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, time));
-      this.onSuggestedMarkerMove?.(this.dragSuggestedMarkerId, clamped);
+      // If multi-selected, move all
+      if (this.selectedSuggestedIds.size > 1 && this.selectedSuggestedIds.has(this.dragSuggestedMarkerId)) {
+        const startPos = this.dragStartSuggestedPositions.get(this.dragSuggestedMarkerId);
+        if (startPos !== undefined) {
+          const delta = clamped - startPos;
+          for (const id of this.selectedSuggestedIds) {
+            const orig = this.dragStartSuggestedPositions.get(id);
+            if (orig === undefined) continue;
+            let nt = orig + delta;
+            nt = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, nt));
+            // Clamp to duration will be done in app
+            this.onSuggestedMarkerMove?.(id, nt);
+          }
+        }
+      } else {
+        this.onSuggestedMarkerMove?.(this.dragSuggestedMarkerId, clamped);
+      }
       return;
     }
 
     if (this.isDraggingMarker && this.dragMarkerId !== null) {
       const time = this.xToTime(coords.x);
       const clamped = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, time));
-      this.onMarkerMove?.(this.dragMarkerId, clamped);
+      if (this.selectedMarkerIds.size > 1 && this.selectedMarkerIds.has(this.dragMarkerId)) {
+        const startPos = this.dragStartPositions.get(this.dragMarkerId);
+        if (startPos !== undefined) {
+          const delta = clamped - startPos;
+          for (const id of this.selectedMarkerIds) {
+            const orig = this.dragStartPositions.get(id);
+            if (orig === undefined) continue;
+            let nt = orig + delta;
+            nt = Math.max(this.view.viewStart, Math.min(this.view.viewEnd, nt));
+            this.onMarkerMove?.(id, nt);
+          }
+        }
+      } else {
+        this.onMarkerMove?.(this.dragMarkerId, clamped);
+      }
       return;
     }
 
@@ -542,7 +791,56 @@ export class WaveformRenderer {
     this.render();
   }
 
-  private onMouseUp(): void {
+  private onMouseUp(_e?: MouseEvent): void {
+    // Handle box selection first (drag-to-select)
+    if (this.isBoxSelecting) {
+      const start = this.boxStart;
+      const end = this.boxEnd;
+      const isTinyClick = start && end && Math.abs(end.x - start.x) < 5 && Math.abs(end.y - start.y) < 5;
+      this.isBoxSelecting = false;
+      this.boxStart = null;
+      this.boxEnd = null;
+      // Snapshot not needed beyond this point but clear
+      this.boxStartSelectedMarkerIds.clear();
+      this.boxStartSelectedSuggestedIds.clear();
+      if (isTinyClick && start) {
+        const time = this.xToTime(start.x);
+        if (time >= this.view.viewStart && time <= this.view.viewEnd) {
+          if (this.deferSeekToDoubleClick) {
+            this.scheduleDeferredSeek(time);
+          } else {
+            this.onSeek?.(time);
+          }
+        }
+        // Tiny click: sets already reflect cleared (non-shift) or preserved (shift) state
+        this.onMarkerSelect?.(this.selectedMarkerId);
+        this.onSuggestedMarkerSelect?.(this.selectedSuggestedMarkerId);
+      } else {
+        // Genuine drag: persist the sets computed during mousemove.
+        // Do NOT call single-select callbacks with null when multi (>1) — that would clear the highlight.
+        // Keep multi-selection highlighted until next empty click or delete.
+        if (this.selectedMarkerIds.size <= 1) {
+          this.onMarkerSelect?.(this.selectedMarkerId);
+        }
+        if (this.selectedSuggestedIds.size <= 1) {
+          this.onSuggestedMarkerSelect?.(this.selectedSuggestedMarkerId);
+        }
+        // For multi (>1), we intentionally keep renderer sets without notifying app via single callbacks;
+        // app reads getSelectedMarkerIds()/getSelectedSuggestedIds() directly for delete/drag.
+      }
+      this.render();
+      if (isTinyClick) {
+        return;
+      }
+      this.isDraggingTrimStart = false;
+      this.isDraggingTrimEnd = false;
+      this.isDraggingMarker = false;
+      this.dragMarkerId = null;
+      this.isDraggingSuggestedMarker = false;
+      this.dragSuggestedMarkerId = null;
+      return;
+    }
+
     const wasDraggingTrim = this.isDraggingTrimStart || this.isDraggingTrimEnd;
     const wasDraggingMarker = this.isDraggingMarker;
     const wasDraggingSuggested = this.isDraggingSuggestedMarker;
@@ -564,13 +862,21 @@ export class WaveformRenderer {
     this.dragMarkerId = null;
     this.isDraggingSuggestedMarker = false;
     this.dragSuggestedMarkerId = null;
+    this.dragStartPositions.clear();
+    this.dragStartSuggestedPositions.clear();
     if (didMove) {
       this.onAfterChange?.();
     }
+    this.render();
   }
 
   private onMouseLeave(): void {
     this.hoverX = null;
+    // Box/drag should only end on mouse up, not on leave — keep it capped at graph edge
+    if (this.isBoxSelecting || this.isDraggingMarker || this.isDraggingSuggestedMarker || this.isDraggingTrimStart || this.isDraggingTrimEnd) {
+      this.render();
+      return;
+    }
     this.onMouseUp();
     this.render();
   }
@@ -591,6 +897,9 @@ export class WaveformRenderer {
   }
 
   render(): void {
+    void this.deferSeekToDoubleClick;
+    void this.scheduleDeferredSeek;
+    void this.clearPendingSeek;
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = rect.width * dpr;
@@ -615,6 +924,7 @@ export class WaveformRenderer {
     this.drawHoverLine(h);
     this.drawHomeLine(h);
     this.drawPlayhead(h);
+    this.drawSelectionBox(h);
   }
 
   private drawBorder(w: number, h: number): void {
@@ -746,7 +1056,7 @@ export class WaveformRenderer {
     if (this.suggestedVisible) {
       for (const m of this.suggestedMarkers) {
         const mx = this.timeToX(m.time);
-        const isSelected = m.id === this.selectedSuggestedMarkerId;
+        const isSelected = this.selectedSuggestedIds.has(m.id) || m.id === this.selectedSuggestedMarkerId;
 
         ctx.strokeStyle = isSelected ? '#ff6b6b' : '#4caf50';
         ctx.lineWidth = isSelected ? 2 : 1.5;
@@ -784,7 +1094,7 @@ export class WaveformRenderer {
 
     for (const m of this.markers) {
       const mx = this.timeToX(m.time);
-      const isSelected = m.id === this.selectedMarkerId;
+      const isSelected = this.selectedMarkerIds.has(m.id) || m.id === this.selectedMarkerId;
 
       ctx.strokeStyle = isSelected ? '#ff6b6b' : '#f0c040';
       ctx.lineWidth = isSelected ? 2 : 1.5;
@@ -810,6 +1120,23 @@ export class WaveformRenderer {
       ctx.textBaseline = 'bottom';
       ctx.fillText(m.time.toFixed(2) + 's', mx, markerY - 6 * dpr);
     }
+  }
+
+  private drawSelectionBox(_h: number): void {
+    if (!this.isBoxSelecting || !this.boxStart || !this.boxEnd) return;
+    const xMin = Math.min(this.boxStart.x, this.boxEnd.x);
+    const xMax = Math.max(this.boxStart.x, this.boxEnd.x);
+    const yMin = Math.min(this.boxStart.y, this.boxEnd.y);
+    const yMax = Math.max(this.boxStart.y, this.boxEnd.y);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(240, 192, 64, 0.9)';
+    ctx.fillStyle = 'rgba(240, 192, 64, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.fillRect(xMin, yMin, xMax - xMin, yMax - yMin);
+    ctx.strokeRect(xMin, yMin, xMax - xMin, yMax - yMin);
+    ctx.restore();
   }
 
   private drawPlayhead(h: number): void {
