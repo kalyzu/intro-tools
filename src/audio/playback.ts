@@ -1,7 +1,7 @@
 import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
-import { createFilterChain } from './filter';
+import { createFilterChain, createSafetyLimiter } from './filter';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
@@ -22,6 +22,7 @@ export class PlaybackEngine {
   private analyser: AnalyserNode | null = null;
   private volumeGain: GainNode | null = null;
   private outputGain: GainNode | null = null;
+  private limiter: DynamicsCompressorNode | null = null;
   private fadeGain: GainNode | null = null;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
@@ -112,7 +113,10 @@ export class PlaybackEngine {
 
     let ctx: AudioContext;
     try {
-      ctx = new AudioContext();
+      // Match offline sampleRate to avoid warping mismatch at 20kHz (Nyquist)
+      // Offline uses buffer.sampleRate (e.g. 44.1k), playback should too.
+      const sr = this.buffer?.sampleRate;
+      ctx = sr ? new AudioContext({ sampleRate: sr } as AudioContextOptions) : new AudioContext();
     } catch (err) {
       console.error('Failed to create AudioContext:', err);
       this.state = 'stopped';
@@ -260,6 +264,9 @@ export class PlaybackEngine {
       this.outputGain?.disconnect();
     } catch {}
     try {
+      this.limiter?.disconnect();
+    } catch {}
+    try {
       this.fadeGain?.disconnect();
     } catch {}
     try {
@@ -270,6 +277,7 @@ export class PlaybackEngine {
     this.analyser = null;
     this.volumeGain = null;
     this.outputGain = null;
+    this.limiter = null;
     this.fadeGain = null;
   }
 
@@ -285,12 +293,16 @@ export class PlaybackEngine {
     const volumeGain = ctx.createGain();
     this.volumeGain = volumeGain;
 
-    // Static headroom: ~-2.5 dBFS (0.75) to prevent filter overshoot (1.059/1.078) from hard-clipping.
-    // More aggressive than -1dB to clean 24/48 dB (12 was already clean at -1dB, 48 peaked at 0.96).
-    // Consistent gain for entire signal, no limiter/compressor, applied to playback and offline.
+    // Static headroom: ~-2.5 dBFS (0.75). It alone cannot cover filter overshoot
+    // on hot masters (measured up to ~1.9x on drum transients during fade-out
+    // sweeps), so a safety limiter below catches the spikes that would otherwise
+    // exceed 1.0 and hard-clip. Same chain as offline export.
     const outputGain = ctx.createGain();
     outputGain.gain.value = 0.75; // -2.5 dB ≈ 0.75, approx -2 to -3 dB range
     this.outputGain = outputGain;
+
+    const limiter = createSafetyLimiter(ctx);
+    this.limiter = limiter;
 
     const fadeGain = ctx.createGain();
     fadeGain.gain.value = 1;
@@ -306,7 +318,8 @@ export class PlaybackEngine {
     }
     volumeGain.connect(analyser);
     analyser.connect(outputGain);
-    outputGain.connect(fadeGain);
+    outputGain.connect(limiter);
+    limiter.connect(fadeGain);
     fadeGain.connect(ctx.destination);
   }
 
@@ -370,7 +383,7 @@ export class PlaybackEngine {
   private scheduleFadeAutomation(bufStartTime: number): void {
     if (!this.audioContext || !this.fadeGain) return;
     const acNow = this.audioContext.currentTime;
-    const fadeSec = 0.005;
+    const fadeSec = 0.01;
     const trimDuration = this.trimEnd - Math.max(this.trimStart, bufStartTime);
     // Start at 0, ramp to 1 over fadeSec, hold, then ramp to 0 at end
     this.fadeGain.gain.cancelScheduledValues(0);

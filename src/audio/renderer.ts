@@ -1,7 +1,7 @@
 import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
-import { createFilterChain } from './filter';
+import { createFilterChain, createSafetyLimiter } from './filter';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
@@ -34,62 +34,89 @@ export async function renderOffline(
   const lastFilter = filters[filters.length - 1];
 
   const volumeGain = offlineCtx.createGain();
-  // Static headroom ~-2.5 dBFS (0.75) matches playback, more aggressive to clean 48 dB
+  // Static headroom ~-2.5 dBFS (0.75) matches playback. It alone cannot cover
+  // filter overshoot on hot masters (measured up to ~1.9x on drum transients
+  // during fade-out sweeps), so the shared safety limiter catches spikes that
+  // would otherwise exceed 1.0 and wrap around int16 below (pop/static).
   const outputGain = offlineCtx.createGain();
   outputGain.gain.value = 0.75; // -2.5 dB
+  const limiter = createSafetyLimiter(offlineCtx);
+  const fadeGain = offlineCtx.createGain();
+  fadeGain.gain.value = 1;
 
   source.connect(filters[0]);
   lastFilter.connect(volumeGain);
   volumeGain.connect(outputGain);
-  outputGain.connect(offlineCtx.destination);
+  outputGain.connect(limiter);
+  limiter.connect(fadeGain);
+  fadeGain.connect(offlineCtx.destination);
 
-  const step = 0.005;
-  const rampDuration = 0.007;
-
-  for (const filter of filters) {
-    const initialFreq = Math.max(1, evaluateAutomation(points, 0, interpolate));
-    filter.frequency.setValueAtTime(initialFreq, 0);
-  }
-
-  for (let t = step; t <= trimDuration; t += step) {
-    const freq = Math.max(1, evaluateAutomation(points, t, interpolate));
-
-    for (const filter of filters) {
-      filter.frequency.exponentialRampToValueAtTime(freq, t + rampDuration);
+  // Sample-accurate automation for offline: use setValueCurveAtTime (per-sample)
+  // to avoid the 5ms step / 7ms ramp quantisation that caused transients on
+  // lowpass sweeps during export (vs smooth playback). Playback keeps the
+  // coarse ramps for real-time performance; offline can afford per-sample.
+  if (trimLength > 0) {
+    const freqCurve = new Float32Array(trimLength);
+    for (let i = 0; i < trimLength; i++) {
+      const t = i / sampleRate;
+      freqCurve[i] = Math.max(1, evaluateAutomation(points, t, interpolate));
     }
-  }
+    for (const filter of filters) {
+      // @ts-ignore - setValueCurveAtTime is available on OfflineAudioContext
+      if (typeof (filter.frequency as any).setValueCurveAtTime === 'function') {
+        (filter.frequency as any).setValueCurveAtTime(freqCurve, 0, trimDuration);
+      } else {
+        // Fallback to coarse ramps if curve not available
+        const step = 0.005;
+        const rampDuration = 0.007;
+        filter.frequency.setValueAtTime(freqCurve[0], 0);
+        for (let t = step; t <= trimDuration; t += step) {
+          const freq = freqCurve[Math.min(Math.floor(t * sampleRate), freqCurve.length - 1)];
+          filter.frequency.exponentialRampToValueAtTime(freq, t + rampDuration);
+        }
+      }
+    }
 
-  // Volume automation (green graph) - linear gain 0-1
-  if (volumePoints && volumePoints.length > 0) {
-    const initialGain = evaluateVolumeAutomation(volumePoints, 0, interpolateVolume);
-    volumeGain.gain.setValueAtTime(Math.max(0, Math.min(2, initialGain)), 0);
-    for (let t = step; t <= trimDuration; t += step) {
-      const gain = evaluateVolumeAutomation(volumePoints, t, interpolateVolume);
-      volumeGain.gain.linearRampToValueAtTime(Math.max(0, Math.min(2, gain)), t + rampDuration);
+    if (volumePoints && volumePoints.length > 0) {
+      const gainCurve = new Float32Array(trimLength);
+      for (let i = 0; i < trimLength; i++) {
+        const t = i / sampleRate;
+        gainCurve[i] = Math.max(0, Math.min(2, evaluateVolumeAutomation(volumePoints, t, interpolateVolume)));
+      }
+      // @ts-ignore
+      if (typeof (volumeGain.gain as any).setValueCurveAtTime === 'function') {
+        (volumeGain.gain as any).setValueCurveAtTime(gainCurve, 0, trimDuration);
+      } else {
+        const step = 0.005;
+        const rampDuration = 0.007;
+        volumeGain.gain.setValueAtTime(gainCurve[0], 0);
+        for (let t = step; t <= trimDuration; t += step) {
+          const gain = gainCurve[Math.min(Math.floor(t * sampleRate), gainCurve.length - 1)];
+          volumeGain.gain.linearRampToValueAtTime(gain, t + rampDuration);
+        }
+      }
+    } else {
+      volumeGain.gain.setValueAtTime(1, 0);
     }
   } else {
     volumeGain.gain.setValueAtTime(1, 0);
   }
 
+  // De-click fade (matches playback's fadeGain): 10 ms to cover 300Hz 48dB settle (~7.8ms)
+  const fadeSec = 0.01;
+  fadeGain.gain.setValueAtTime(0, 0);
+  fadeGain.gain.linearRampToValueAtTime(1, fadeSec);
+  if (trimDuration > fadeSec * 2) {
+    fadeGain.gain.setValueAtTime(1, trimDuration - fadeSec);
+    fadeGain.gain.linearRampToValueAtTime(0, trimDuration);
+  } else {
+    fadeGain.gain.setValueAtTime(1, fadeSec);
+    fadeGain.gain.linearRampToValueAtTime(0, trimDuration);
+  }
+
   source.start(0, trimStart);
 
   const renderedBuffer = await offlineCtx.startRendering();
-
-  // De-click: apply short linear fades to avoid pop from hard cut at trim boundaries
-  // and from filter state at start/end. Only needed for offline export; playback's
-  // real-time context masks the transient, but we keep it consistent.
-  const fadeSec = 0.005; // 5ms
-  const fadeSamples = Math.min(Math.floor(fadeSec * sampleRate), Math.floor(renderedBuffer.length / 2));
-  if (fadeSamples > 0) {
-    for (let ch = 0; ch < renderedBuffer.numberOfChannels; ch++) {
-      const data = renderedBuffer.getChannelData(ch);
-      for (let i = 0; i < fadeSamples; i++) {
-        const g = i / fadeSamples;
-        data[i] *= g;
-        data[data.length - 1 - i] *= g;
-      }
-    }
-  }
 
   if (onProgress) {
     onProgress({ progress: 1 });
@@ -137,9 +164,10 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
   let offset = 44;
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
-      // No hard-clipping: headroom gain (0.891) ensures peak <1.0 for filter overshoot.
-      // Direct conversion, allow float headroom to prevent distortion.
-      const sample = channels[ch][i];
+      // Clamp: the limiter above keeps peaks under 1.0, but never trust float
+      // for int16 — an unclamped over-1.0 sample wraps around in setInt16
+      // (e.g. 1.1 -> large negative), a full-scale single-sample pop/static.
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
       const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
       view.setInt16(offset, int16, true);
       offset += 2;
