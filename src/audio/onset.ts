@@ -1,24 +1,20 @@
 // Bass/snare onset detection – no classification, hi-hats ignored
-// Vanilla TS, no external deps, O(N) <10ms for 30s
+// Vanilla TS, no external deps, linear-time analysis with fixed-size windows
 // Design: 2-band (low 20-150Hz, mid 150-4000Hz) log-energy flux, weighted, detrended, adaptive threshold
 
 export interface OnsetOptions {
-  sensitivity?: number; // 0..1, higher = more sensitive (more false positives). Default 0.5
-  minGapSec?: number; // minimum inter-onset, default 0.04 (40ms) to allow 0.62/0.69 (70ms) close pair
+  sensitivity?: number; // 0..1, higher = more sensitive (more false positives). Default 0.25
+  minGapSec?: number; // minimum inter-onset, default 0.20
 }
 
 export function detectDrumOnsets(
   buffer: AudioBuffer,
   options: OnsetOptions = {}
 ): number[] {
-  const sensitivity = options.sensitivity ?? 0.7; // tuned for 99%+ on both test sets
-  const minGapSec = options.minGapSec ?? 0.04;
+  const sensitivity = options.sensitivity ?? 0.25;
+  const minGapSec = options.minGapSec ?? 0.2;
 
-  // Map sensitivity 0..1 to offset: higher sensitivity => lower threshold offset
-  // Tuned on /tmp/opencode/test.wav (8 targets) + test2.wav (7 targets)
-  // N=1024 hop256 w0.5: sens 0.7 offset 0.136 => 22+17 peaks 8/8 & 7/7 (100%)
-  // Prefer more false positives, so default 0.7 => offset ~0.136
-  const offset = 0.22 - sensitivity * 0.12; // 0.22 -> 0.10 (0.7 => 0.136)
+  const offset = Math.max(0, 0.05 - sensitivity * 0.04);
 
   const sr = buffer.sampleRate;
   const mono = mixToMono(buffer);
@@ -27,7 +23,7 @@ export function detectDrumOnsets(
   const low = applyLowpass(mono, 120, 0.707, sr);
   const mid = applyBandpass(mono, 150, 4000, sr);
 
-  const N = 1024;
+  const N = 2048;
   const hop = 256;
   const nFrames = Math.max(1, 1 + Math.floor((mono.length - N) / hop));
   const times = new Float64Array(nFrames);
@@ -61,7 +57,7 @@ export function detectDrumOnsets(
     fluxMid[i] = Math.max(0, logEMid[i] - logEMid[i - 1]);
   }
 
-  const wLow = 0.5;
+  const wLow = 0.4;
   const flux = new Float64Array(nFrames);
   for (let i = 0; i < nFrames; i++) {
     flux[i] = wLow * fluxLow[i] + (1 - wLow) * fluxMid[i];
@@ -73,16 +69,19 @@ export function detectDrumOnsets(
   for (let i = 0; i < nFrames; i++) fluxDetrended[i] = flux[i] - med17[i];
 
   const med11 = medianFilter(fluxDetrended, 11);
+  const deviations = new Float64Array(nFrames);
+  for (let i = 0; i < nFrames; i++) deviations[i] = Math.abs(fluxDetrended[i] - med11[i]);
+  const localMad = medianFilter(deviations, 31);
   const thresh = new Float64Array(nFrames);
-  for (let i = 0; i < nFrames; i++) thresh[i] = med11[i] + offset;
+  for (let i = 0; i < nFrames; i++) {
+    const noiseFloor = localMad[i] * 1.4826 * 4;
+    thresh[i] = med11[i] + Math.max(offset, noiseFloor);
+  }
 
-  const peakIdxs: number[] = [];
+  const strongPeakIdxs: number[] = [];
+  const weakPeakIdxs: number[] = [];
   for (let i = 1; i < nFrames - 1; i++) {
-    if (
-      fluxDetrended[i] > thresh[i] &&
-      fluxDetrended[i] > fluxDetrended[i - 1] &&
-      fluxDetrended[i] > fluxDetrended[i + 1]
-    ) {
+    if (fluxDetrended[i] > fluxDetrended[i - 1] && fluxDetrended[i] > fluxDetrended[i + 1]) {
       // 5-point local max
       let isMax = true;
       for (let k = Math.max(0, i - 2); k <= Math.min(nFrames - 1, i + 2); k++) {
@@ -91,9 +90,25 @@ export function detectDrumOnsets(
           break;
         }
       }
-      if (isMax) peakIdxs.push(i);
+      if (isMax) {
+        if (fluxDetrended[i] > thresh[i]) strongPeakIdxs.push(i);
+        else if (fluxDetrended[i] > thresh[i] * 0.75) weakPeakIdxs.push(i);
+      }
     }
   }
+
+  const peakIdxs = [...strongPeakIdxs];
+  // Keep a weaker onset only when it forms a close double-hit with a strong one.
+  for (const candidate of weakPeakIdxs) {
+    const time = times[candidate];
+    if (strongPeakIdxs.some(index => {
+      const distance = Math.abs(times[index] - time);
+      return distance >= minGapSec && distance <= 0.11;
+    })) {
+      peakIdxs.push(candidate);
+    }
+  }
+  peakIdxs.sort((a, b) => a - b);
 
   const peakTimes = peakIdxs.map(i => times[i]);
   const peakFlux = peakIdxs.map(i => fluxDetrended[i]);
@@ -119,9 +134,9 @@ export function detectDrumOnsets(
   // Clamp to buffer duration and sort
   const duration = buffer.duration;
   const result = filtered.filter(t => t >= 0 && t <= duration).sort((a, b) => a - b);
-  // Small time correction: flux peak lags energy rise by ~ hop/2, backtrack 5ms to nearest local minimum
-  // For now keep as is; could add 5ms backtrack: t - 0.005
-  return result;
+  // Overlapping frames and the band filters put the detected peak slightly
+  // before the transient's audible attack.
+  return result.map(time => Math.min(duration, time + (N / 4 + hop) / sr));
 }
 
 function mixToMono(buffer: AudioBuffer): Float32Array {
