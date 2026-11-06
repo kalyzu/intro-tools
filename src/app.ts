@@ -157,7 +157,6 @@ class LowPassEditor {
       this.playbackEngine.seek(this.clampTrimTime(time));
       this.updateHomeLines();
     });
-    this.markerWaveform.setDeferSeekToDoubleClick(true);
     this.markerWaveform.setAfterChangeCallback(() => this.pushMarkersHistory());
 
     const refCanvas = document.getElementById('ref-waveform-canvas') as HTMLCanvasElement;

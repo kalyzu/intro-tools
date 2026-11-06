@@ -74,9 +74,6 @@ export class WaveformRenderer {
   private onPanRequest: ((delta: number) => void) | null = null;
 
   private hoverX: number | null = null;
-  private deferSeekToDoubleClick = false;
-  private pendingSeekTimer: number | null = null;
-  private lastEmptyClickTime = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -123,10 +120,6 @@ export class WaveformRenderer {
 
   setPanRequestCallback(cb: (delta: number) => void): void {
     this.onPanRequest = cb;
-  }
-
-  setDeferSeekToDoubleClick(defer: boolean): void {
-    this.deferSeekToDoubleClick = defer;
   }
 
   getHoverTime(): number | null {
@@ -634,39 +627,10 @@ export class WaveformRenderer {
     // No box selection (trim/filter screens): seek directly
     const time = this.xToTime(coords.x);
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
-      if (this.deferSeekToDoubleClick) {
-        this.scheduleDeferredSeek(time);
-      } else {
-        this.onSeek?.(time);
-      }
+      this.onSeek?.(time);
     }
     // Ensure deselected visuals if we cleared? Already cleared only for box mode
     this.render();
-  }
-
-  private scheduleDeferredSeek(time: number): void {
-    const now = performance.now();
-    this.clearPendingSeek();
-
-    if (this.lastEmptyClickTime !== 0 && now - this.lastEmptyClickTime < 400) {
-      this.lastEmptyClickTime = now;
-      return;
-    }
-
-    this.lastEmptyClickTime = now;
-    this.pendingSeekTimer = window.setTimeout(() => {
-      if (this.pendingSeekTimer !== null) {
-        this.pendingSeekTimer = null;
-        this.onSeek?.(time);
-      }
-    }, 300);
-  }
-
-  private clearPendingSeek(): void {
-    if (this.pendingSeekTimer !== null) {
-      window.clearTimeout(this.pendingSeekTimer);
-      this.pendingSeekTimer = null;
-    }
   }
 
   private onWheel(e: WheelEvent): void {
@@ -826,11 +790,7 @@ export class WaveformRenderer {
       if (isTinyClick && start) {
         const time = this.xToTime(start.x);
         if (time >= this.view.viewStart && time <= this.view.viewEnd) {
-          if (this.deferSeekToDoubleClick) {
-            this.scheduleDeferredSeek(time);
-          } else {
-            this.onSeek?.(time);
-          }
+          this.onSeek?.(time);
         }
         // Tiny click: sets already reflect cleared (non-shift) or preserved (shift) state
         this.onMarkerSelect?.(this.selectedMarkerId);
@@ -904,7 +864,6 @@ export class WaveformRenderer {
   private onDoubleClick(e: MouseEvent): void {
     if (!this.markersVisible) return;
     const coords = this.getCanvasCoords(e);
-    this.clearPendingSeek();
     const markerId = this.findMarkerAt(coords);
     const suggestedId = this.findSuggestedMarkerAt(coords);
     if (markerId !== null || suggestedId !== null) return;
@@ -913,13 +872,9 @@ export class WaveformRenderer {
     if (time >= this.view.viewStart && time <= this.view.viewEnd) {
       this.onMarkerAdd?.(time);
     }
-    this.lastEmptyClickTime = 0;
   }
 
   render(): void {
-    void this.deferSeekToDoubleClick;
-    void this.scheduleDeferredSeek;
-    void this.clearPendingSeek;
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
     const width = Math.round(rect.width * dpr);
