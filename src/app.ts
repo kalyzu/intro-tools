@@ -1239,7 +1239,7 @@ class LowPassEditor {
     if (this.markers.length === 0) return;
 
     const lines = this.markers.map(m => m.time.toFixed(2));
-    const content = lines.join('\n') + '\n';
+    const content = lines.join('\n');
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
