@@ -3,8 +3,18 @@ import type { ViewState, Marker } from '../automation/model';
 const TRIM_HANDLE_WIDTH = 8;
 
 export class WaveformRenderer {
+  private static peakCaches = new WeakMap<AudioBuffer, {
+    blockSize: number;
+    numBlocks: number;
+    channelMins: Float32Array[];
+    channelMaxs: Float32Array[];
+  }>();
+
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  private waveformCanvas = document.createElement('canvas');
+  private waveformCtx = this.waveformCanvas.getContext('2d')!;
+  private waveformCacheKey = '';
   private buffer: AudioBuffer | null = null;
   private playheadTime = 0;
   private homeTime = 0;
@@ -169,6 +179,13 @@ export class WaveformRenderer {
   private buildPeakCache(): void {
     if (!this.buffer) {
       this.peakCache = null;
+      this.waveformCacheKey = '';
+      return;
+    }
+    const cached = WaveformRenderer.peakCaches.get(this.buffer);
+    if (cached) {
+      this.peakCache = cached;
+      this.waveformCacheKey = '';
       return;
     }
     const blockSize = WaveformRenderer.BASE_BLOCK_SIZE;
@@ -199,7 +216,10 @@ export class WaveformRenderer {
       channelMins.push(mins);
       channelMaxs.push(maxs);
     }
-    this.peakCache = { blockSize, numBlocks, channelMins, channelMaxs };
+    const peakCache = { blockSize, numBlocks, channelMins, channelMaxs };
+    WaveformRenderer.peakCaches.set(this.buffer, peakCache);
+    this.peakCache = peakCache;
+    this.waveformCacheKey = '';
   }
 
   private getPeakForRange(s0: number, s1: number): { min: number; max: number } {
@@ -902,18 +922,20 @@ export class WaveformRenderer {
     void this.clearPendingSeek;
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
-    this.canvas.width = rect.width * dpr;
-    this.canvas.height = rect.height * dpr;
+    const width = Math.round(rect.width * dpr);
+    const height = Math.round(rect.height * dpr);
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
     const w = this.canvas.width;
     const h = this.canvas.height;
     this.ctx.clearRect(0, 0, w, h);
 
-    if (!this.buffer) return;
+    if (!this.buffer || w <= 0 || h <= 0) return;
 
     if (this.showBorder) {
       this.drawBorder(w, h);
     }
-    this.drawWaveform(w, h);
+    this.drawCachedWaveform(w, h, dpr);
     if (this.trimVisible) {
       this.drawTrimRegion(w, h);
       this.drawTrimHandles(w, h);
@@ -925,6 +947,24 @@ export class WaveformRenderer {
     this.drawHomeLine(h);
     this.drawPlayhead(h);
     this.drawSelectionBox(h);
+  }
+
+  private drawCachedWaveform(w: number, h: number, dpr: number): void {
+    if (!this.buffer) return;
+    const fill = this.cssVar('--waveform-fill', '#2a3a4a');
+    const key = [
+      w, h, dpr, this.view.viewStart, this.view.viewEnd,
+      this.buffer.sampleRate, this.buffer.length, fill,
+    ].join(':');
+
+    if (key !== this.waveformCacheKey) {
+      if (this.waveformCanvas.width !== w) this.waveformCanvas.width = w;
+      if (this.waveformCanvas.height !== h) this.waveformCanvas.height = h;
+      this.waveformCtx.clearRect(0, 0, w, h);
+      this.drawWaveform(w, h, this.waveformCtx, fill);
+      this.waveformCacheKey = key;
+    }
+    this.ctx.drawImage(this.waveformCanvas, 0, 0);
   }
 
   private drawBorder(w: number, h: number): void {
@@ -986,10 +1026,9 @@ export class WaveformRenderer {
     ctx.fillRect(endX, 0, w - endX, h);
   }
 
-  private drawWaveform(w: number, h: number): void {
+  private drawWaveform(w: number, h: number, ctx: CanvasRenderingContext2D, fill: string): void {
     if (!this.buffer) return;
     const dpr = window.devicePixelRatio || 1;
-    const ctx = this.ctx;
     const graphWidth = w - (this.paddingLeft + this.paddingRight) * dpr;
     const startX = this.paddingLeft * dpr;
     if (graphWidth <= 0) return;
@@ -999,7 +1038,7 @@ export class WaveformRenderer {
     const centerY = h / 2;
     const amplitudeScale = centerY * 0.9;
 
-    ctx.fillStyle = this.cssVar('--waveform-fill', '#2a3a4a');
+    ctx.fillStyle = fill;
 
     // Audacity-style: per-pixel min/max envelope, not averaged
     for (let px = 0; px < graphWidth; px++) {

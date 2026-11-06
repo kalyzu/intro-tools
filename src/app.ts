@@ -28,6 +28,7 @@ class LowPassEditor {
   private automationCustomized = false;
   private volumePoints: VolumePoint[] = [];
   private volumeCustomized = false;
+  private isLoadingAudio = false;
   private playbackEngine: PlaybackEngine;
   private trimWaveform: WaveformRenderer | null = null;
   private markerWaveform: WaveformRenderer | null = null;
@@ -367,6 +368,14 @@ class LowPassEditor {
   }
 
   private async loadFile(file: File): Promise<void> {
+    if (this.isLoadingAudio) return;
+    this.isLoadingAudio = true;
+    const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
+    const openButton = document.getElementById('open-btn') as HTMLButtonElement | null;
+    const dropZone = document.getElementById('drop-zone');
+    if (fileInput) fileInput.disabled = true;
+    if (openButton) openButton.disabled = true;
+    dropZone?.setAttribute('aria-busy', 'true');
     try {
       this.playbackEngine.stop();
       this.decodedAudio = await decodeAudioFile(file);
@@ -426,6 +435,11 @@ class LowPassEditor {
     } catch (err) {
       console.error('Failed to load audio:', err);
       alert('Failed to load audio file. Please try a different format.');
+    } finally {
+      this.isLoadingAudio = false;
+      if (fileInput) fileInput.disabled = false;
+      if (openButton) openButton.disabled = false;
+      dropZone?.removeAttribute('aria-busy');
     }
   }
 
