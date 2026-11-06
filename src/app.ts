@@ -222,16 +222,16 @@ class LowPassEditor {
     const markerZoomResetBtn = document.getElementById('marker-zoom-reset-btn')!;
     const filterZoomResetBtn = document.getElementById('filter-zoom-reset-btn')!;
     zoomResetBtn.addEventListener('click', () => {
-      zoomSlider.value = '1';
-      this.updateZoom(1);
+      zoomSlider.value = '0';
+      this.updateZoom(0);
     });
     markerZoomResetBtn.addEventListener('click', () => {
-      markerZoomSlider.value = '1';
-      this.updateZoom(1);
+      markerZoomSlider.value = '0';
+      this.updateZoom(0);
     });
     filterZoomResetBtn.addEventListener('click', () => {
-      filterZoomSlider.value = '1';
-      this.updateZoom(1);
+      filterZoomSlider.value = '0';
+      this.updateZoom(0);
     });
 
     const trimUndoBtn = document.getElementById('trim-undo-btn') as HTMLButtonElement | null;
@@ -511,9 +511,9 @@ class LowPassEditor {
     this.volumeEditor?.setActive(isFilter);
     this.playbackEngine.setFilterEnabled(!isTrim);
 
-    (document.getElementById('zoom-slider') as HTMLInputElement).value = '1';
-    (document.getElementById('marker-zoom-slider') as HTMLInputElement).value = '1';
-    (document.getElementById('filter-zoom-slider') as HTMLInputElement).value = '1';
+    (document.getElementById('zoom-slider') as HTMLInputElement).value = '0';
+    (document.getElementById('marker-zoom-slider') as HTMLInputElement).value = '0';
+    (document.getElementById('filter-zoom-slider') as HTMLInputElement).value = '0';
 
     const axisDuration = this.getAxisDuration();
     if (axisDuration > 0) {
@@ -545,14 +545,39 @@ class LowPassEditor {
     this.volumeEditor?.setHomeTime(home);
   }
 
-  private updateZoom(zoom: number): void {
+  private getMaximumZoom(): number {
+    const buffer = this.mode === 'trim' ? this.decodedAudio?.buffer : this.trimmedBuffer;
+    if (!buffer) return 1;
+    const canvasId = this.mode === 'trim'
+      ? 'waveform-canvas'
+      : this.mode === 'markers'
+        ? 'marker-canvas'
+        : 'ref-waveform-canvas';
+    const canvas = document.getElementById(canvasId);
+    const canvasWidth = canvas?.getBoundingClientRect().width || window.innerWidth;
+    const graphWidth = Math.max(1, canvasWidth - 80);
+    return Math.max(1, (buffer.length / graphWidth));
+  }
+
+  private zoomFromSlider(value: number): number {
+    const fraction = Math.max(0, Math.min(100, value)) / 100;
+    return Math.exp(Math.log(this.getMaximumZoom()) * fraction);
+  }
+
+  private sliderFromZoom(zoom: number): number {
+    const maxZoom = this.getMaximumZoom();
+    if (maxZoom <= 1) return 0;
+    return Math.round(100 * Math.log(Math.max(1, Math.min(maxZoom, zoom))) / Math.log(maxZoom));
+  }
+
+  private updateZoom(sliderValue: number): void {
     const axisDuration = this.getAxisDuration();
     if (axisDuration <= 0) return;
 
     const anchor = Math.max(0, Math.min(axisDuration, this.playbackEngine.getHomeTime()));
     const viewRange = Math.max(1e-6, this.view.viewEnd - this.view.viewStart);
     const frac = Math.max(0, Math.min(1, (anchor - this.view.viewStart) / viewRange));
-    const viewWidth = axisDuration / Math.max(1, zoom);
+    const viewWidth = axisDuration / this.zoomFromSlider(sliderValue);
     let viewStart = anchor - frac * viewWidth;
     let viewEnd = viewStart + viewWidth;
     if (viewStart < 0) {
@@ -572,7 +597,7 @@ class LowPassEditor {
     if (axisDuration <= 0) return;
 
     const current = axisDuration / Math.max(1e-6, this.view.viewEnd - this.view.viewStart);
-    const zoom = Math.max(1, Math.min(50, current * factor));
+    const zoom = Math.max(1, Math.min(this.getMaximumZoom(), current * factor));
     const viewWidth = axisDuration / zoom;
     const anchor = Math.max(0, Math.min(axisDuration, center));
     const f = Math.max(0, Math.min(1, frac));
@@ -590,7 +615,7 @@ class LowPassEditor {
 
     const sliderId = this.mode === 'trim' ? 'zoom-slider' : this.mode === 'markers' ? 'marker-zoom-slider' : 'filter-zoom-slider';
     const slider = document.getElementById(sliderId) as HTMLInputElement | null;
-    if (slider) slider.value = String(zoom);
+    if (slider) slider.value = String(this.sliderFromZoom(zoom));
 
     this.syncView();
   }
