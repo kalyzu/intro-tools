@@ -440,6 +440,10 @@ body {
 .waveform-canvas {
   width: 100%;
   flex: 1;
+  /* Without this, a canvas sized in device pixels becomes its own minimum
+     layout size on high-DPR screens, so every render makes it larger. */
+  min-width: 0;
+  min-height: 0;
   display: block;
   background: var(--bg-primary);
   cursor: crosshair;
@@ -448,6 +452,8 @@ body {
 .automation-canvas {
   width: 100%;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   display: block;
   background: var(--bg-primary);
   cursor: crosshair;

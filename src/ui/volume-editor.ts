@@ -770,8 +770,10 @@ export class VolumeEditor {
   render(): void {
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
-    this.canvas.width = rect.width * dpr;
-    this.canvas.height = rect.height * dpr;
+    const width = Math.round(rect.width * dpr);
+    const height = Math.round(rect.height * dpr);
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     const b = this.getGraphBounds();

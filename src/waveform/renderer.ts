@@ -247,7 +247,7 @@ export class WaveformRenderer {
     this.waveformCacheKey = '';
   }
 
-  private getPeakForRange(s0: number, s1: number): { min: number; max: number } {
+  private getPeakForRange(s0: number, s1: number, channels: Float32Array[]): { min: number; max: number } {
     if (!this.buffer) return { min: 0, max: 0 };
     const bufferLength = this.buffer.length;
     s0 = Math.max(0, Math.min(bufferLength, s0));
@@ -256,14 +256,14 @@ export class WaveformRenderer {
     if (s1 <= s0) return { min: 0, max: 0 };
 
     if (s1 - s0 <= WaveformRenderer.EXACT_RANGE_MAX) {
-      return this.getExactPeak(s0, s1);
+      return this.getExactPeak(s0, s1, channels);
     }
-    return this.getOverviewPeak(s0, s1);
+    return this.getOverviewPeak(s0, s1, channels);
   }
 
-  private getOverviewPeak(s0: number, s1: number): { min: number; max: number } {
+  private getOverviewPeak(s0: number, s1: number, channels: Float32Array[]): { min: number; max: number } {
     const cache = this.overviewCache;
-    if (!cache) return this.getExactPeak(s0, s1);
+    if (!cache) return this.getExactPeak(s0, s1, channels);
 
     const startBlock = Math.max(0, Math.floor(s0 / cache.blockSize));
     const endBlock = Math.min(cache.numBlocks, Math.ceil(s1 / cache.blockSize));
@@ -283,9 +283,8 @@ export class WaveformRenderer {
     };
   }
 
-  private getExactPeak(s0: number, s1: number): { min: number; max: number } {
+  private getExactPeak(s0: number, s1: number, channels: Float32Array[]): { min: number; max: number } {
     if (!this.buffer) return { min: 0, max: 0 };
-    const channels = this.buffer.numberOfChannels;
     const blockSize = WaveformRenderer.EXACT_BLOCK_SIZE;
     const bufferLength = this.buffer.length;
     let min = Infinity;
@@ -297,8 +296,8 @@ export class WaveformRenderer {
       const blockStart = b * blockSize;
       const blockEnd = Math.min(blockStart + blockSize, bufferLength);
       if (s0 <= blockStart && s1 >= blockEnd) {
-        const peaks = this.getExactBlock(b).peaks;
-        for (let ch = 0; ch < channels; ch++) {
+        const peaks = this.getExactBlock(b, channels).peaks;
+        for (let ch = 0; ch < channels.length; ch++) {
           const blockMin = peaks[ch * 2];
           const blockMax = peaks[ch * 2 + 1];
           if (blockMin < min) min = blockMin;
@@ -307,8 +306,8 @@ export class WaveformRenderer {
       } else {
         const from = Math.max(s0, blockStart);
         const to = Math.min(s1, blockEnd);
-        for (let ch = 0; ch < channels; ch++) {
-          const data = this.buffer.getChannelData(ch);
+        for (let ch = 0; ch < channels.length; ch++) {
+          const data = channels[ch];
           for (let i = from; i < to; i++) {
             const v = data[i];
             if (v < min) min = v;
@@ -324,7 +323,7 @@ export class WaveformRenderer {
     };
   }
 
-  private getExactBlock(blockIndex: number): ExactPeakBlock {
+  private getExactBlock(blockIndex: number, channels: Float32Array[]): ExactPeakBlock {
     if (!this.exactCache) this.exactCache = new Map();
     const cached = this.exactCache.get(blockIndex);
     if (cached) return cached;
@@ -332,15 +331,14 @@ export class WaveformRenderer {
       this.exactCache.clear();
     }
 
-    const buffer = this.buffer!;
-    const channels = buffer.numberOfChannels;
+    const bufferLength = this.buffer!.length;
     const blockSize = WaveformRenderer.EXACT_BLOCK_SIZE;
     const start = blockIndex * blockSize;
-    const end = Math.min(start + blockSize, buffer.length);
-    const peaks = new Float32Array(channels * 2);
+    const end = Math.min(start + blockSize, bufferLength);
+    const peaks = new Float32Array(channels.length * 2);
 
-    for (let ch = 0; ch < channels; ch++) {
-      const data = buffer.getChannelData(ch);
+    for (let ch = 0; ch < channels.length; ch++) {
+      const data = channels[ch];
       let min = Infinity;
       let max = -Infinity;
       for (let i = start; i < end; i++) {
@@ -1061,7 +1059,15 @@ export class WaveformRenderer {
     const centerY = h / 2;
     const amplitudeScale = centerY * 0.9;
 
+    // Reading channel data repeatedly from the AudioBuffer is surprisingly
+    // costly on mobile, so grab each channel once for the whole draw.
+    const channels: Float32Array[] = [];
+    for (let ch = 0; ch < this.buffer.numberOfChannels; ch++) {
+      channels.push(this.buffer.getChannelData(ch));
+    }
+
     ctx.fillStyle = fill;
+    ctx.beginPath();
 
     // Audacity-style: per-pixel min/max envelope, not averaged
     for (let px = 0; px < graphWidth; px++) {
@@ -1069,14 +1075,17 @@ export class WaveformRenderer {
       const t1 = this.view.viewStart + ((px + 1) / graphWidth) * viewDuration;
       const s0 = Math.floor(t0 * sampleRate);
       const s1 = Math.ceil(t1 * sampleRate);
-      const { min, max } = this.getPeakForRange(s0, s1);
+      const { min, max } = this.getPeakForRange(s0, s1, channels);
       if (min === 0 && max === 0) continue;
       const yMin = centerY + min * amplitudeScale;
       const yMax = centerY + max * amplitudeScale;
       const y = Math.min(yMin, yMax);
       const height = Math.max(1, Math.abs(yMax - yMin));
-      ctx.fillRect(startX + px, y, 1, height);
+      ctx.rect(startX + px, y, 1, height);
     }
+
+    // Batch the whole envelope into one fill instead of one call per pixel.
+    ctx.fill();
   }
 
   private drawTrimHandles(_w: number, h: number): void {
