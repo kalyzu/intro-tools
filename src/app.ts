@@ -366,6 +366,19 @@ class LowPassEditor {
     return Math.max(0, Math.min(this.getTrimDuration(), time));
   }
 
+  private setLoading(loading: boolean, message?: string): void {
+    const indicator = document.getElementById('loading-indicator');
+    const label = document.getElementById('loading-label');
+    if (label && message) label.textContent = message;
+    if (indicator) indicator.hidden = !loading;
+  }
+
+  private yieldToUI(): Promise<void> {
+    return new Promise(resolve => {
+      setTimeout(resolve, 0);
+    });
+  }
+
   private async loadFile(file: File): Promise<void> {
     if (this.isLoadingAudio) return;
     this.isLoadingAudio = true;
@@ -375,10 +388,23 @@ class LowPassEditor {
     if (fileInput) fileInput.disabled = true;
     if (openButton) openButton.disabled = true;
     dropZone?.setAttribute('aria-busy', 'true');
+    this.setLoading(true, 'Loading audio…');
     try {
       this.playbackEngine.stop();
-      this.decodedAudio = await decodeAudioFile(file);
+      // Drop references to the previous file before decoding so its decoded
+      // and trimmed buffers can be garbage-collected while the new file loads.
+      this.decodedAudio = null;
       this.trimmedBuffer = null;
+      this.playbackEngine.clearBuffer();
+      this.trimWaveform?.clearBuffer();
+      this.markerWaveform?.clearBuffer();
+      this.refWaveform?.clearBuffer();
+
+      await this.yieldToUI();
+      this.decodedAudio = await decodeAudioFile(file);
+
+      this.setLoading(true, 'Preparing waveform…');
+      await this.yieldToUI();
 
       document.getElementById('file-name')!.textContent = file.name;
       document.getElementById('clip-info')!.hidden = false;
@@ -387,6 +413,7 @@ class LowPassEditor {
 
       this.trimStart = 0;
       this.trimEnd = this.decodedAudio.duration;
+      this.mode = 'trim';
       this.markers = [];
       this.nextMarkerId = 1;
       this.selectedMarkerId = null;
@@ -424,7 +451,6 @@ class LowPassEditor {
       this.volumeEditor!.setDuration(this.getTrimDuration());
       this.volumeEditor!.setPoints(this.volumePoints);
 
-      this.mode = 'trim';
       this.showModeScreen();
 
       const continueBtn = document.getElementById('continue-btn') as HTMLButtonElement;
@@ -433,12 +459,24 @@ class LowPassEditor {
       this.updateExportButtons();
     } catch (err) {
       console.error('Failed to load audio:', err);
+      // The previous buffers were released up front, so return to an empty
+      // state instead of leaving the editor showing stale controls.
+      this.decodedAudio = null;
+      this.trimmedBuffer = null;
+      this.mode = 'trim';
+      const clipInfo = document.getElementById('clip-info');
+      const trimContent = document.getElementById('trim-content');
+      if (clipInfo) clipInfo.hidden = true;
+      if (trimContent) trimContent.hidden = true;
+      if (dropZone) dropZone.hidden = false;
+      this.showModeScreen();
       alert('Failed to load audio file. Please try a different format.');
     } finally {
       this.isLoadingAudio = false;
       if (fileInput) fileInput.disabled = false;
       if (openButton) openButton.disabled = false;
       dropZone?.removeAttribute('aria-busy');
+      this.setLoading(false);
     }
   }
 

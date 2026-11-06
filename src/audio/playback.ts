@@ -47,6 +47,22 @@ export class PlaybackEngine {
     this.trimEnd = buffer.duration;
   }
 
+  clearBuffer(): void {
+    if (this.state !== 'stopped') {
+      this.stop();
+    }
+    this.cleanup();
+    try {
+      this.audioContext?.close();
+    } catch {}
+    this.audioContext = null;
+    this.buffer = null;
+    this.trimStart = 0;
+    this.trimEnd = 0;
+    this.homeTime = 0;
+    this.pauseTime = 0;
+  }
+
   setTrim(start: number, end: number): void {
     this.trimStart = start;
     this.trimEnd = end;

@@ -2,13 +2,25 @@ import type { ViewState, Marker } from '../automation/model';
 
 const TRIM_HANDLE_WIDTH = 8;
 
+interface OverviewPeaks {
+  blockSize: number;
+  numBlocks: number;
+  channelMins: Float32Array[];
+  channelMaxs: Float32Array[];
+}
+
+interface ExactPeakBlock {
+  // Interleaved per channel: [min0, max0, min1, max1, ...]
+  peaks: Float32Array;
+}
+
 export class WaveformRenderer {
-  private static peakCaches = new WeakMap<AudioBuffer, {
-    blockSize: number;
-    numBlocks: number;
-    channelMins: Float32Array[];
-    channelMaxs: Float32Array[];
-  }>();
+  private static overviewCaches = new WeakMap<AudioBuffer, OverviewPeaks>();
+  private static readonly OVERVIEW_BLOCKS = 16384;
+  private static readonly OVERVIEW_SAMPLES_PER_BLOCK = 64;
+  private static readonly EXACT_BLOCK_SIZE = 256;
+  private static readonly EXACT_RANGE_MAX = 2048;
+  private static readonly MAX_EXACT_BLOCKS = 16384;
 
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -52,14 +64,10 @@ export class WaveformRenderer {
   private markersVisible = true;
   private showBorder = false;
 
-  // Audacity-style cached peak envelope (min/max per block)
-  private peakCache: {
-    blockSize: number;
-    numBlocks: number;
-    channelMins: Float32Array[];
-    channelMaxs: Float32Array[];
-  } | null = null;
-  private static readonly BASE_BLOCK_SIZE = 256;
+  // Small, bounded overview envelope for the whole file plus exact blocks
+  // built lazily for the currently visible range.
+  private overviewCache: OverviewPeaks | null = null;
+  private exactCache: Map<number, ExactPeakBlock> | null = null;
 
   private onTrimChange: ((start: number, end: number) => void) | null = null;
   private onBeforeChange: (() => void) | null = null;
@@ -164,29 +172,46 @@ export class WaveformRenderer {
   }
 
   setBuffer(buffer: AudioBuffer): void {
+    if (this.buffer !== buffer) {
+      this.overviewCache = null;
+      this.exactCache = null;
+    }
     this.buffer = buffer;
-    this.buildPeakCache();
+    this.buildOverviewCache();
     this.render();
   }
 
-  private buildPeakCache(): void {
+  clearBuffer(): void {
+    this.buffer = null;
+    this.overviewCache = null;
+    this.exactCache = null;
+    this.waveformCacheKey = '';
+    this.render();
+  }
+
+  private buildOverviewCache(): void {
     if (!this.buffer) {
-      this.peakCache = null;
+      this.overviewCache = null;
       this.waveformCacheKey = '';
       return;
     }
-    const cached = WaveformRenderer.peakCaches.get(this.buffer);
+    const cached = WaveformRenderer.overviewCaches.get(this.buffer);
     if (cached) {
-      this.peakCache = cached;
+      this.overviewCache = cached;
       this.waveformCacheKey = '';
       return;
     }
-    const blockSize = WaveformRenderer.BASE_BLOCK_SIZE;
-    const channels = this.buffer.numberOfChannels;
+
     const length = this.buffer.length;
-    const numBlocks = Math.ceil(length / blockSize);
+    const channels = this.buffer.numberOfChannels;
+    // Scan a bounded number of samples per overview block so building the
+    // whole-file envelope stays roughly constant-time regardless of duration.
+    const blockSize = Math.max(1, Math.ceil(length / WaveformRenderer.OVERVIEW_BLOCKS));
+    const numBlocks = Math.max(1, Math.ceil(length / blockSize));
+    const stride = Math.max(1, Math.ceil(blockSize / WaveformRenderer.OVERVIEW_SAMPLES_PER_BLOCK));
     const channelMins: Float32Array[] = [];
     const channelMaxs: Float32Array[] = [];
+
     for (let ch = 0; ch < channels; ch++) {
       const data = this.buffer.getChannelData(ch);
       const mins = new Float32Array(numBlocks);
@@ -196,97 +221,140 @@ export class WaveformRenderer {
         const end = Math.min(start + blockSize, length);
         let min = Infinity;
         let max = -Infinity;
-        for (let i = start; i < end; i++) {
+        for (let i = start; i < end; i += stride) {
           const v = data[i];
           if (v < min) min = v;
           if (v > max) max = v;
         }
-        if (min === Infinity) min = 0;
-        if (max === -Infinity) max = 0;
-        mins[b] = min;
-        maxs[b] = max;
+        // Always include the final sample of the block so peaks at block
+        // boundaries are not missed by the strided scan.
+        const last = end - 1;
+        if (last >= start && (last - start) % stride !== 0) {
+          const v = data[last];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+        mins[b] = min === Infinity ? 0 : min;
+        maxs[b] = max === -Infinity ? 0 : max;
       }
       channelMins.push(mins);
       channelMaxs.push(maxs);
     }
-    const peakCache = { blockSize, numBlocks, channelMins, channelMaxs };
-    WaveformRenderer.peakCaches.set(this.buffer, peakCache);
-    this.peakCache = peakCache;
+
+    const cache = { blockSize, numBlocks, channelMins, channelMaxs };
+    WaveformRenderer.overviewCaches.set(this.buffer, cache);
+    this.overviewCache = cache;
     this.waveformCacheKey = '';
   }
 
   private getPeakForRange(s0: number, s1: number): { min: number; max: number } {
-    if (!this.buffer || !this.peakCache) return { min: 0, max: 0 };
-    const { blockSize, channelMins, channelMaxs } = this.peakCache;
+    if (!this.buffer) return { min: 0, max: 0 };
     const bufferLength = this.buffer.length;
     s0 = Math.max(0, Math.min(bufferLength, s0));
     s1 = Math.max(0, Math.min(bufferLength, s1));
     if (s1 <= s0) s1 = Math.min(bufferLength, s0 + 1);
-    const rangeLen = s1 - s0;
-    if (rangeLen <= blockSize * 2) {
-      let min = Infinity;
-      let max = -Infinity;
-      for (let ch = 0; ch < this.buffer.numberOfChannels; ch++) {
-        const data = this.buffer.getChannelData(ch);
-        for (let i = s0; i < s1; i++) {
-          const v = data[i];
-          if (v < min) min = v;
-          if (v > max) max = v;
-        }
-      }
-      if (min === Infinity) min = 0;
-      if (max === -Infinity) max = 0;
-      return { min, max };
+    if (s1 <= s0) return { min: 0, max: 0 };
+
+    if (s1 - s0 <= WaveformRenderer.EXACT_RANGE_MAX) {
+      return this.getExactPeak(s0, s1);
     }
-    const startBlock = Math.floor(s0 / blockSize);
-    const endBlock = Math.ceil(s1 / blockSize);
+    return this.getOverviewPeak(s0, s1);
+  }
+
+  private getOverviewPeak(s0: number, s1: number): { min: number; max: number } {
+    const cache = this.overviewCache;
+    if (!cache) return this.getExactPeak(s0, s1);
+
+    const startBlock = Math.max(0, Math.floor(s0 / cache.blockSize));
+    const endBlock = Math.min(cache.numBlocks, Math.ceil(s1 / cache.blockSize));
     let min = Infinity;
     let max = -Infinity;
-    for (let ch = 0; ch < channelMins.length; ch++) {
-      const mins = channelMins[ch];
-      const maxs = channelMaxs[ch];
-      const firstBlockStart = startBlock * blockSize;
-      const firstBlockEnd = Math.min((startBlock + 1) * blockSize, bufferLength);
-      if (s0 > firstBlockStart && s0 < firstBlockEnd) {
-        const data = this.buffer.getChannelData(ch);
-        for (let i = s0; i < Math.min(s1, firstBlockEnd); i++) {
-          const v = data[i];
-          if (v < min) min = v;
-          if (v > max) max = v;
-        }
-      } else if (s0 <= firstBlockStart) {
-        if (startBlock < mins.length) {
-          if (mins[startBlock] < min) min = mins[startBlock];
-          if (maxs[startBlock] > max) max = maxs[startBlock];
-        }
-      }
-      for (let b = startBlock + 1; b < endBlock - 1; b++) {
-        if (b < 0 || b >= mins.length) continue;
+    for (let ch = 0; ch < cache.channelMins.length; ch++) {
+      const mins = cache.channelMins[ch];
+      const maxs = cache.channelMaxs[ch];
+      for (let b = startBlock; b < endBlock; b++) {
         if (mins[b] < min) min = mins[b];
         if (maxs[b] > max) max = maxs[b];
       }
-      if (endBlock - 1 > startBlock) {
-        const lastBlock = endBlock - 1;
-        const lastBlockStart = lastBlock * blockSize;
-        const lastBlockEnd = Math.min((lastBlock + 1) * blockSize, bufferLength);
-        if (s1 > lastBlockStart && s1 < lastBlockEnd) {
+    }
+    return {
+      min: min === Infinity ? 0 : min,
+      max: max === -Infinity ? 0 : max,
+    };
+  }
+
+  private getExactPeak(s0: number, s1: number): { min: number; max: number } {
+    if (!this.buffer) return { min: 0, max: 0 };
+    const channels = this.buffer.numberOfChannels;
+    const blockSize = WaveformRenderer.EXACT_BLOCK_SIZE;
+    const bufferLength = this.buffer.length;
+    let min = Infinity;
+    let max = -Infinity;
+
+    const firstBlock = Math.floor(s0 / blockSize);
+    const lastBlock = Math.floor((s1 - 1) / blockSize);
+    for (let b = firstBlock; b <= lastBlock; b++) {
+      const blockStart = b * blockSize;
+      const blockEnd = Math.min(blockStart + blockSize, bufferLength);
+      if (s0 <= blockStart && s1 >= blockEnd) {
+        const peaks = this.getExactBlock(b).peaks;
+        for (let ch = 0; ch < channels; ch++) {
+          const blockMin = peaks[ch * 2];
+          const blockMax = peaks[ch * 2 + 1];
+          if (blockMin < min) min = blockMin;
+          if (blockMax > max) max = blockMax;
+        }
+      } else {
+        const from = Math.max(s0, blockStart);
+        const to = Math.min(s1, blockEnd);
+        for (let ch = 0; ch < channels; ch++) {
           const data = this.buffer.getChannelData(ch);
-          for (let i = Math.max(s0, lastBlockStart); i < s1; i++) {
+          for (let i = from; i < to; i++) {
             const v = data[i];
             if (v < min) min = v;
             if (v > max) max = v;
           }
-        } else if (s1 >= lastBlockEnd) {
-          if (lastBlock < mins.length) {
-            if (mins[lastBlock] < min) min = mins[lastBlock];
-            if (maxs[lastBlock] > max) max = maxs[lastBlock];
-          }
         }
       }
     }
-    if (min === Infinity) min = 0;
-    if (max === -Infinity) max = 0;
-    return { min, max };
+
+    return {
+      min: min === Infinity ? 0 : min,
+      max: max === -Infinity ? 0 : max,
+    };
+  }
+
+  private getExactBlock(blockIndex: number): ExactPeakBlock {
+    if (!this.exactCache) this.exactCache = new Map();
+    const cached = this.exactCache.get(blockIndex);
+    if (cached) return cached;
+    if (this.exactCache.size >= WaveformRenderer.MAX_EXACT_BLOCKS) {
+      this.exactCache.clear();
+    }
+
+    const buffer = this.buffer!;
+    const channels = buffer.numberOfChannels;
+    const blockSize = WaveformRenderer.EXACT_BLOCK_SIZE;
+    const start = blockIndex * blockSize;
+    const end = Math.min(start + blockSize, buffer.length);
+    const peaks = new Float32Array(channels * 2);
+
+    for (let ch = 0; ch < channels; ch++) {
+      const data = buffer.getChannelData(ch);
+      let min = Infinity;
+      let max = -Infinity;
+      for (let i = start; i < end; i++) {
+        const v = data[i];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      peaks[ch * 2] = min === Infinity ? 0 : min;
+      peaks[ch * 2 + 1] = max === -Infinity ? 0 : max;
+    }
+
+    const block = { peaks };
+    this.exactCache.set(blockIndex, block);
+    return block;
   }
 
   setView(view: ViewState): void {
