@@ -2,8 +2,10 @@
 // Pure TS, no deps, O(n log n)
 
 export interface Pattern {
-  interval: number; // dominant IOI in seconds
-  phase: number; // anchor time (first marker % interval)
+  interval: number; // average interval, for consumers that need a single estimate
+  intervals: number[]; // repeating interval sequence in seconds
+  nextIntervalIndex: number; // next position in intervals after the seed markers
+  phase: number; // first marker time
   confidence: number; // 0-1
   tolerance: number; // absolute seconds
 }
@@ -15,9 +17,9 @@ export interface PatternOptions {
 }
 
 /**
- * Find the dominant repeating interval from sorted marker times.
- * Uses histogram clustering of IOIs: intervals within tolerance are grouped.
- * Returns null if not enough markers (<2) or no clear repeat.
+ * Infer a repeating interval sequence from sorted marker times. Repeated
+ * sequences are averaged by position; otherwise all observed intervals form
+ * the seed sequence, allowing uneven rhythms to be continued.
  */
 export function findRepeatingPattern(
   times: number[],
@@ -26,63 +28,53 @@ export function findRepeatingPattern(
 ): Pattern | null {
   const tolAbs = options.toleranceSec ?? 0.06;
   const tolRel = options.toleranceRel ?? 0.08;
-  const minRepeats = options.minRepeats ?? 2;
+  const minRepeats = Math.max(2, options.minRepeats ?? 2);
 
   if (times.length < 2) return null;
 
   const sorted = [...times].sort((a, b) => a - b);
-  // Build IOIs
   const iois: number[] = [];
   for (let i = 0; i < sorted.length - 1; i++) {
     const d = sorted[i + 1] - sorted[i];
-    if (d > 0.04 && d < 2.0) iois.push(d); // ignore too close (<40ms flam) and too long (>2s)
+    if (d > 0) iois.push(d);
   }
   if (iois.length === 0) return null;
 
-  // Cluster IOIs
-  iois.sort((a, b) => a - b);
-  type Cluster = { sum: number; count: number; members: number[] };
-  const clusters: Cluster[] = [];
-  for (const d of iois) {
-    let found: Cluster | null = null;
-    for (const c of clusters) {
-      const mean = c.sum / c.count;
-      const tol = Math.max(tolAbs, mean * tolRel);
-      if (Math.abs(d - mean) <= tol) {
-        found = c;
-        break;
-      }
-    }
-    if (found) {
-      found.sum += d;
-      found.count++;
-      found.members.push(d);
-    } else {
-      clusters.push({ sum: d, count: 1, members: [d] });
+  // Find the shortest repeated IOI sequence (e.g. A-B-C-A-B-C).
+  let intervals = iois;
+  let cycles = 1;
+  for (let period = 1; period <= Math.floor(iois.length / minRepeats); period++) {
+    const groups = Array.from({ length: period }, () => [] as number[]);
+    for (let i = 0; i < iois.length; i++) groups[i % period].push(iois[i]);
+    const repeats = Math.min(...groups.map(group => group.length));
+    if (repeats < minRepeats) continue;
+
+    const matches = groups.every(group => {
+      const mean = group.reduce((sum, value) => sum + value, 0) / group.length;
+      const tolerance = Math.max(tolAbs, mean * tolRel);
+      return group.every(value => Math.abs(value - mean) <= tolerance);
+    });
+    if (matches) {
+      intervals = groups.map(group => group.reduce((sum, value) => sum + value, 0) / group.length);
+      cycles = repeats;
+      break;
     }
   }
-  // Find cluster with most members
-  clusters.sort((a, b) => b.count - a.count);
-  const best = clusters[0];
-  if (!best || best.count < minRepeats) {
-    // Fallback: use median IOI if not enough repeats but at least 1 interval
-    if (iois.length >= 1) {
-      const median = iois[Math.floor(iois.length / 2)];
-      return { interval: median, phase: sorted[0] % median, confidence: 0.3, tolerance: Math.max(tolAbs, median * tolRel) };
-    }
-    return null;
-  }
-  const interval = best.sum / best.count;
-  const confidence = Math.min(1, best.count / Math.max(1, iois.length * 0.6) + 0.3); // 0.3 base + up to 0.7 for dominance
+  const interval = intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
   const tolerance = Math.max(tolAbs, interval * tolRel);
-  // Phase as first marker modulo interval (or median phase)
-  const phase = sorted[0] % interval;
-  return { interval, phase, confidence, tolerance };
+  const confidence = cycles > 1 ? Math.min(1, 0.5 + cycles * 0.1) : 0.3;
+  return {
+    interval,
+    intervals,
+    nextIntervalIndex: iois.length % intervals.length,
+    phase: sorted[0],
+    confidence,
+    tolerance,
+  };
 }
 
 /**
- * Extend a seed pattern (sorted times) to fill duration using interval.
- * Generates times at phase + k*interval that are not already within tolerance of existing markers.
+ * Repeat the seed's interval sequence after its last marker and before its first.
  */
 export function extendPattern(
   seedTimes: number[],
@@ -94,45 +86,25 @@ export function extendPattern(
   const allExisting = [...existingTimes, ...sortedSeed].sort((a, b) => a - b);
   const result: number[] = [];
 
-  // Determine phase from seed if pattern phase is generic
-  // Use first seed time as anchor to keep musical phase, but keep pattern.phase for grid
-  // We generate from 0 to duration on the grid, then filter to after last seed
-  const interval = pattern.interval;
-  const toleranceSec = pattern.tolerance;
-  void toleranceSec; // used via 0.03 threshold below for dedup
+  if (sortedSeed.length < 2 || pattern.intervals.length === 0) return result;
 
-  // Find the grid that best aligns with seed times: choose offset that minimizes total error
-  // Simple: use seedTimes[0] as anchor, generate forward/backward from there
-  const anchor = sortedSeed[0] ?? pattern.phase;
-  // Generate forward from anchor
-  for (let k = 0; ; k++) {
-    const t = anchor + k * interval;
-    if (t > duration + 0.001) break;
-    if (t < -0.001) continue;
-    // Skip if already exists within tolerance
-    const exists = allExisting.some(et => Math.abs(et - t) < 0.03);
-    const alreadyGenerated = result.some(rt => Math.abs(rt - t) < 0.03);
-    if (!exists && !alreadyGenerated) {
-      // Only generate beyond the last seed to avoid duplicating existing pattern region
-      // For "repeat pattern" we want to continue after the last user marker
-      if (t > sortedSeed[sortedSeed.length - 1] + 0.02) {
-        result.push(t);
-      }
-    }
+  const isExisting = (time: number) => allExisting.some(existing => Math.abs(existing - time) < 0.03);
+  const first = sortedSeed[0];
+  const last = sortedSeed[sortedSeed.length - 1];
+  let time = last;
+  let index = pattern.nextIntervalIndex;
+  while (time < duration) {
+    time += pattern.intervals[index];
+    index = (index + 1) % pattern.intervals.length;
+    if (time <= duration && !isExisting(time)) result.push(time);
   }
-  // Also generate backward before first seed if there's headroom (e.g., user started not at 0)
-  for (let k = -1; ; k--) {
-    const t = anchor + k * interval;
-    if (t < -0.001) break;
-    if (t > duration) continue;
-    const exists = allExisting.some(et => Math.abs(et - t) < 0.03);
-    const alreadyGenerated = result.some(rt => Math.abs(rt - t) < 0.03);
-    if (!exists && !alreadyGenerated) {
-      if (t < sortedSeed[0] - 0.02) {
-        result.unshift(t);
-      }
-    }
-    if (k < -100) break; // safety
+
+  time = first;
+  index = pattern.intervals.length - 1;
+  while (time > 0) {
+    time -= pattern.intervals[index];
+    index = (index - 1 + pattern.intervals.length) % pattern.intervals.length;
+    if (time >= 0 && !isExisting(time)) result.push(time);
   }
 
   return result.sort((a, b) => a - b);

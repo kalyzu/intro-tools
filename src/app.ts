@@ -907,13 +907,10 @@ class LowPassEditor {
           const allTimes = [...this.markers, ...this.suggestedMarkers].map(m => m.time).sort((a, b) => a - b);
           const pattern = findRepeatingPattern(allTimes, this.getTrimDuration());
           if (pattern) {
-            // Find nearest grid point
-            const interval = pattern.interval;
-            const phase = allTimes[0] % interval;
+            const gridTimes = [...allTimes, ...extendPattern(allTimes, pattern, this.getTrimDuration(), allTimes)];
             let bestGrid: number | null = null;
             let bestGridDist = Infinity;
-            for (let k = 0; k * interval <= this.getTrimDuration() + interval; k++) {
-              const gridTime = phase + k * interval;
+            for (const gridTime of gridTimes) {
               const d = Math.abs(gridTime - sm.time);
               if (d < bestGridDist && d < pattern.tolerance) {
                 bestGridDist = d;
