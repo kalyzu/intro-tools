@@ -2,6 +2,7 @@ import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain, createSafetyLimiter } from './filter';
+import { DEFAULT_REVERB_SETTINGS, createReverbChain, type ReverbChain, type ReverbSettings } from './reverb';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
@@ -24,6 +25,9 @@ export class PlaybackEngine {
   private outputGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
   private fadeGain: GainNode | null = null;
+  private reverbChain: ReverbChain | null = null;
+  private reverbSettings: ReverbSettings = { ...DEFAULT_REVERB_SETTINGS };
+  private reverbEnabled = false;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
   private startTime = 0;
@@ -79,6 +83,34 @@ export class PlaybackEngine {
       const time = this.getCurrentTime();
       this.stop();
       this.play(Math.max(0, time));
+    }
+  }
+
+  setReverb(settings: ReverbSettings): void {
+    const previous = this.reverbSettings;
+    this.reverbSettings = { ...settings };
+    if (!this.reverbEnabled || this.state !== 'playing') return;
+    // Decay/damping changes are inaudible while the mix is fully dry.
+    if (previous.mix === 0 && settings.mix === 0) return;
+
+    const needsRebuild =
+      (previous.mix > 0) !== (settings.mix > 0) ||
+      previous.decay !== settings.decay ||
+      previous.damping !== settings.damping ||
+      previous.preDelay !== settings.preDelay;
+
+    if (needsRebuild) {
+      this.play(Math.max(0, this.getCurrentTime()));
+    } else {
+      this.reverbChain?.setMix(settings.mix);
+    }
+  }
+
+  setReverbEnabled(enabled: boolean): void {
+    if (this.reverbEnabled === enabled) return;
+    this.reverbEnabled = enabled;
+    if (this.state === 'playing') {
+      this.play(Math.max(0, this.getCurrentTime()));
     }
   }
 
@@ -288,6 +320,9 @@ export class PlaybackEngine {
     try {
       this.fadeGain?.gain.cancelScheduledValues(0);
     } catch {}
+    try {
+      this.reverbChain?.dispose();
+    } catch {}
     this.source = null;
     this.filters = [];
     this.analyser = null;
@@ -295,6 +330,7 @@ export class PlaybackEngine {
     this.outputGain = null;
     this.limiter = null;
     this.fadeGain = null;
+    this.reverbChain = null;
   }
 
   private buildGraph(ctx: AudioContext): void {
@@ -332,7 +368,14 @@ export class PlaybackEngine {
       this.filters = [];
       source.connect(volumeGain);
     }
-    volumeGain.connect(analyser);
+    if (this.reverbEnabled && this.reverbSettings.mix > 0) {
+      this.reverbChain = createReverbChain(ctx, this.reverbSettings);
+      volumeGain.connect(this.reverbChain.input);
+      this.reverbChain.output.connect(analyser);
+    } else {
+      this.reverbChain = null;
+      volumeGain.connect(analyser);
+    }
     analyser.connect(outputGain);
     outputGain.connect(limiter);
     limiter.connect(fadeGain);
@@ -412,6 +455,16 @@ export class PlaybackEngine {
       // Very short clip: just stay at 1 and ramp out at end
       this.fadeGain.gain.setValueAtTime(1, acNow + fadeSec);
       this.fadeGain.gain.linearRampToValueAtTime(0, acNow + trimDuration);
+    }
+
+    // The graph is torn down when the source ends, so fade the wet path before
+    // that point instead of letting the tail stop abruptly.
+    if (this.reverbChain && trimDuration > 0) {
+      const wetFade = Math.min(0.25, trimDuration * 0.5);
+      const tail = this.reverbChain.tailGain.gain;
+      tail.cancelScheduledValues(0);
+      tail.setValueAtTime(1, acNow + trimDuration - wetFade);
+      tail.linearRampToValueAtTime(0, acNow + trimDuration);
     }
   }
 

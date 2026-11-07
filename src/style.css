@@ -485,6 +485,29 @@ body {
   flex-shrink: 0;
 }
 
+.reverb-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.reverb-slider {
+  width: 110px;
+}
+
+.reverb-value {
+  min-width: 34px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--accent);
+  text-align: right;
+}
+
 .export-panel {
   flex: 0 0 42%;
   display: flex;

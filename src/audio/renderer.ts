@@ -2,6 +2,7 @@ import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain, createSafetyLimiter } from './filter';
+import { createReverbChain, type ReverbSettings } from './reverb';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
 import { interpolate } from '../automation/interpolation';
@@ -16,6 +17,7 @@ export async function renderOffline(
   points: AutomationPoint[],
   volumePoints: VolumePoint[] | null,
   slope: FilterSlope,
+  reverb: ReverbSettings,
   trimStart: number,
   trimEnd: number,
   onProgress?: (p: RenderProgress) => void
@@ -46,7 +48,13 @@ export async function renderOffline(
 
   source.connect(filters[0]);
   lastFilter.connect(volumeGain);
-  volumeGain.connect(outputGain);
+  const reverbChain = reverb.mix > 0 ? createReverbChain(offlineCtx, reverb) : null;
+  if (reverbChain) {
+    volumeGain.connect(reverbChain.input);
+    reverbChain.output.connect(outputGain);
+  } else {
+    volumeGain.connect(outputGain);
+  }
   outputGain.connect(limiter);
   limiter.connect(fadeGain);
   fadeGain.connect(offlineCtx.destination);
@@ -112,6 +120,15 @@ export async function renderOffline(
   } else {
     fadeGain.gain.setValueAtTime(1, fadeSec);
     fadeGain.gain.linearRampToValueAtTime(0, trimDuration);
+  }
+
+  // The render is exactly as long as the trim, so the reverb tail cannot ring
+  // past the end. Fade only the wet path over the last 250 ms; the dry signal
+  // keeps its normal 10 ms de-click fade.
+  if (reverbChain && trimDuration > 0) {
+    const wetFade = Math.min(0.25, trimDuration * 0.5);
+    reverbChain.tailGain.gain.setValueAtTime(1, trimDuration - wetFade);
+    reverbChain.tailGain.gain.linearRampToValueAtTime(0, trimDuration);
   }
 
   source.start(0, trimStart);

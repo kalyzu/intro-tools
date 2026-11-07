@@ -118,6 +118,23 @@
           <canvas id="volume-canvas" class="automation-canvas"></canvas>
         </div>
 
+        <div class="reverb-bar">
+          <span class="section-label">Reverb</span>
+          <div class="control-group">
+            <label class="control-label" for="reverb-mix">Mix</label>
+            <input id="reverb-mix" class="zoom-slider reverb-slider" type="range" min="0" max="100" step="1" value="0">
+            <span id="reverb-mix-value" class="reverb-value">0%</span>
+          </div>
+          <div class="control-group">
+            <label class="control-label" for="reverb-decay">Decay</label>
+            <select id="reverb-decay" class="control-select">
+              <option value="0.8">Short (0.8 s)</option>
+              <option value="1.8" selected>Medium (1.8 s)</option>
+              <option value="3.2">Long (3.2 s)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="controls-bar">
           <div class="controls-left">
             <div class="control-group">
@@ -173,6 +190,10 @@
               <div class="info-item">
                 <span class="info-label">Low-pass slope</span>
                 <span id="export-slope" class="info-value">&mdash;</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Reverb</span>
+                <span id="export-reverb" class="info-value">&mdash;</span>
               </div>
             </div>
 
