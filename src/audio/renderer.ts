@@ -1,10 +1,12 @@
 import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
+import type { ReverbPoint } from '../automation/reverb-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain, createSafetyLimiter } from './filter';
-import { createReverbChain, type ReverbSettings } from './reverb';
+import { createReverbChain, reverbMixGains, type ReverbSettings } from './reverb';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
+import { evaluateReverbAutomation, getReverbMixRange } from '../automation/reverb-model';
 import { interpolate } from '../automation/interpolation';
 import { interpolateVolume } from '../automation/volume-interpolation';
 
@@ -16,6 +18,7 @@ export async function renderOffline(
   buffer: AudioBuffer,
   points: AutomationPoint[],
   volumePoints: VolumePoint[] | null,
+  reverbPoints: ReverbPoint[],
   slope: FilterSlope,
   reverb: ReverbSettings,
   trimStart: number,
@@ -48,7 +51,10 @@ export async function renderOffline(
 
   source.connect(filters[0]);
   lastFilter.connect(volumeGain);
-  const reverbChain = reverb.mix > 0 ? createReverbChain(offlineCtx, reverb) : null;
+  const reverbActive = getReverbMixRange(reverbPoints).max > 0;
+  const reverbChain = reverbActive
+    ? createReverbChain(offlineCtx, reverb, evaluateReverbAutomation(reverbPoints, 0))
+    : null;
   if (reverbChain) {
     volumeGain.connect(reverbChain.input);
     reverbChain.output.connect(outputGain);
@@ -105,6 +111,25 @@ export async function renderOffline(
       }
     } else {
       volumeGain.gain.setValueAtTime(1, 0);
+    }
+
+    if (reverbChain) {
+      // Mix automation is smooth and does not need per-sample resolution, so
+      // keep the curve at 5 ms. Per-sample arrays would cost hundreds of MB
+      // for long clips on top of the filter and volume curves.
+      const curveSteps = Math.max(1, Math.ceil(trimDuration / 0.005));
+      const dryCurve = new Float32Array(curveSteps + 1);
+      const wetCurve = new Float32Array(curveSteps + 1);
+      for (let i = 0; i <= curveSteps; i++) {
+        const time = (i / curveSteps) * trimDuration;
+        const gains = reverbMixGains(evaluateReverbAutomation(reverbPoints, time));
+        dryCurve[i] = gains.dry;
+        wetCurve[i] = gains.wet;
+      }
+      // @ts-ignore - setValueCurveAtTime is available on OfflineAudioContext
+      reverbChain.dryGain.gain.setValueCurveAtTime(dryCurve, 0, trimDuration);
+      // @ts-ignore
+      reverbChain.wetGain.gain.setValueCurveAtTime(wetCurve, 0, trimDuration);
     }
   } else {
     volumeGain.gain.setValueAtTime(1, 0);

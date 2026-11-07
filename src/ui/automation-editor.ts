@@ -752,7 +752,6 @@ export class AutomationEditor {
       return;
     }
     if (this.points.length - this.selectedIndices.size < 2) return;
-    this.onAfterChange?.();
     // Delete in descending order to keep indices valid
     const toDelete = Array.from(this.selectedIndices).sort((a, b) => b - a);
     for (const idx of toDelete) {
@@ -764,9 +763,7 @@ export class AutomationEditor {
     this.selectedIndex = null;
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(null);
-    // onAfterChange already called before, but need to push final state
-    // Actually we called it before, but we need to ensure the new state is pushed
-    // The onAfterChange at deletePoint already handles, but for bulk we do it here
+    this.onAfterChange?.();
     this.render();
   }
 

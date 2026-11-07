@@ -1,6 +1,4 @@
 export interface ReverbSettings {
-  /** Dry/wet mix, 0 = fully dry, 1 = fully wet. */
-  mix: number;
   /** Reverb tail length in seconds (-60 dB point). */
   decay: number;
   /** 0 = bright tail, 1 = heavily damped tail. */
@@ -10,7 +8,6 @@ export interface ReverbSettings {
 }
 
 export const DEFAULT_REVERB_SETTINGS: ReverbSettings = {
-  mix: 0,
   decay: 1.8,
   damping: 0.35,
   preDelay: 0.02,
@@ -23,7 +20,6 @@ export interface ReverbChain {
   wetGain: GainNode;
   /** Wet path only, used to fade the tail out without touching the dry signal. */
   tailGain: GainNode;
-  setMix(mix: number): void;
   dispose(): void;
 }
 
@@ -51,10 +47,18 @@ function mulberry32(seed: number): () => number {
 
 function sanitizeSettings(settings: ReverbSettings): ReverbSettings {
   return {
-    mix: clamp01(settings.mix),
     decay: clamp(settings.decay, 0.1, 10),
     damping: clamp01(settings.damping),
     preDelay: clamp(settings.preDelay, 0, 1),
+  };
+}
+
+/** Equal-power dry/wet gains for a 0..1 mix. */
+export function reverbMixGains(mix: number): { dry: number; wet: number } {
+  const value = clamp01(mix);
+  return {
+    dry: Math.cos(value * Math.PI / 2),
+    wet: Math.sin(value * Math.PI / 2),
   };
 }
 
@@ -63,8 +67,8 @@ function sanitizeSettings(settings: ReverbSettings): ReverbSettings {
  * with an exponential envelope and a low-pass cutoff that falls over time, so
  * the reverb darkens naturally instead of sounding like a gated noise burst.
  *
- * The raw samples are cached by the parameters that shape the IR. Mix is
- * intentionally excluded: changing the wet level does not rebuild the impulse.
+ * The raw samples are cached by the parameters that shape the IR. Dry/wet mix
+ * is automation, so changing it never rebuilds the impulse.
  */
 export function createReverbImpulseSamples(
   sampleRate: number,
@@ -164,10 +168,13 @@ export function createReverbImpulse(
 /**
  * Parallel dry/wet reverb. Connect the source to `input` and `output` to the
  * next node in the chain; the dry path keeps the original signal intact.
+ * `initialMix` seeds the gains for the start position; callers then automate
+ * `dryGain` and `wetGain` over time.
  */
 export function createReverbChain(
   ctx: BaseAudioContext,
   settings: ReverbSettings,
+  initialMix = 0,
 ): ReverbChain {
   const safe = sanitizeSettings(settings);
   const input = ctx.createGain();
@@ -187,11 +194,12 @@ export function createReverbChain(
   wetGain.connect(tailGain);
   tailGain.connect(output);
 
-  // Equal-power crossfade: the total level stays roughly constant as the mix
-  // moves from dry to wet. Set the initial values directly to avoid a fade-in
-  // when the graph is first built.
-  dryGain.gain.value = Math.cos(safe.mix * Math.PI / 2);
-  wetGain.gain.value = Math.sin(safe.mix * Math.PI / 2);
+  // Set the initial values directly to avoid a fade-in when the graph is
+  // first built. Equal-power keeps the total level roughly constant as the
+  // mix moves from dry to wet.
+  const initialGains = reverbMixGains(initialMix);
+  dryGain.gain.value = initialGains.dry;
+  wetGain.gain.value = initialGains.wet;
   tailGain.gain.value = 1;
 
   return {
@@ -200,12 +208,6 @@ export function createReverbChain(
     dryGain,
     wetGain,
     tailGain,
-    setMix(mix: number): void {
-      const value = clamp01(mix);
-      const now = ctx.currentTime;
-      dryGain.gain.setTargetAtTime(Math.cos(value * Math.PI / 2), now, 0.015);
-      wetGain.gain.setTargetAtTime(Math.sin(value * Math.PI / 2), now, 0.015);
-    },
     dispose(): void {
       for (const node of [input, dryGain, wetGain, tailGain, convolver, output]) {
         try {

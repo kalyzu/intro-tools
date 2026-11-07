@@ -9,8 +9,19 @@ const MAX_GAIN = 1;
 const GAIN_LABELS = [0, 0.25, 0.5, 0.75, 1];
 const GAIN_LABELS_DISPLAY = ['0%', '25%', '50%', '75%', '100%'];
 
-const VOLUME_COLOR = '#4caf50';
-const VOLUME_COLOR_LIGHT = 'rgba(76, 175, 80, 0.25)';
+export interface VolumeEditorTheme {
+  color: string;
+  colorLight: string;
+  selectionStroke: string;
+  selectionFill: string;
+}
+
+const DEFAULT_THEME: VolumeEditorTheme = {
+  color: '#4caf50',
+  colorLight: 'rgba(76, 175, 80, 0.25)',
+  selectionStroke: 'rgba(76, 175, 80, 0.9)',
+  selectionFill: 'rgba(76, 175, 80, 0.15)',
+};
 
 export interface VolumeEditorCallbacks {
   onPointsChange: (points: VolumePoint[]) => void;
@@ -55,11 +66,17 @@ export class VolumeEditor {
   private hoveredSegment = -1;
   private active = true;
   private onAfterChange: (() => void) | null = null;
+  private theme: VolumeEditorTheme;
 
-  constructor(canvas: HTMLCanvasElement, callbacks: VolumeEditorCallbacks) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    callbacks: VolumeEditorCallbacks,
+    theme: Partial<VolumeEditorTheme> = {},
+  ) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.callbacks = callbacks;
+    this.theme = { ...DEFAULT_THEME, ...theme };
     this.setupEvents();
     this.setupResizeObserver();
     this.createTooltip();
@@ -735,6 +752,7 @@ export class VolumeEditor {
     this.selectedIndex = null;
     this.callbacks.onPointsChange([...this.points]);
     this.callbacks.onPointSelect(null);
+    this.onAfterChange?.();
     this.render();
   }
 
@@ -873,7 +891,7 @@ export class VolumeEditor {
       const xEnd = this.timeToX(segEnd);
       const steps = Math.max(20, Math.abs(xEnd - xStart) / 2);
 
-      ctx.strokeStyle = VOLUME_COLOR;
+      ctx.strokeStyle = this.theme.color;
       ctx.lineWidth = 2.5;
       ctx.beginPath();
 
@@ -915,7 +933,7 @@ export class VolumeEditor {
       const mx = (ax + bx) / 2;
       const my = (ay + by) / 2;
 
-      ctx.strokeStyle = VOLUME_COLOR_LIGHT;
+      ctx.strokeStyle = this.theme.colorLight;
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -929,7 +947,7 @@ export class VolumeEditor {
 
       ctx.beginPath();
       ctx.arc(hx, hy, isActive ? 6 : isHovered ? 5 : 4, 0, Math.PI * 2);
-      ctx.fillStyle = isActive ? '#ff6b6b' : VOLUME_COLOR;
+      ctx.fillStyle = isActive ? '#ff6b6b' : this.theme.color;
       ctx.fill();
       if (isActive || isHovered) {
         ctx.strokeStyle = '#ffffff';
@@ -950,7 +968,7 @@ export class VolumeEditor {
 
       ctx.beginPath();
       ctx.arc(x, y, isSelected ? 7 : 5, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? '#ff6b6b' : VOLUME_COLOR;
+      ctx.fillStyle = isSelected ? '#ff6b6b' : this.theme.color;
       ctx.fill();
 
       if (isSelected) {
@@ -969,8 +987,8 @@ export class VolumeEditor {
     const yMax = Math.max(this.boxStart.y, this.boxEnd.y);
     const ctx = this.ctx;
     ctx.save();
-    ctx.strokeStyle = 'rgba(76, 175, 80, 0.9)';
-    ctx.fillStyle = 'rgba(76, 175, 80, 0.15)';
+    ctx.strokeStyle = this.theme.selectionStroke;
+    ctx.fillStyle = this.theme.selectionFill;
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.fillRect(xMin, yMin, xMax - xMin, yMax - yMin);

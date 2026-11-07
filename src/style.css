@@ -373,15 +373,19 @@ body {
 }
 
 .ref-waveform-section {
-  flex: 0.35;
+  flex: 0.3;
   border-bottom: 1px solid var(--border);
 }
 
 .automation-section {
-  flex: 0.5;
+  flex: 0.42;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.reverb-automation-section {
+  flex: 0.38;
 }
 
 .section-header {
@@ -401,6 +405,18 @@ body {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lane-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 12px;
 }
 
 .zoom-controls {
@@ -483,29 +499,6 @@ body {
   border-top: 1px solid var(--border);
   min-height: 44px;
   flex-shrink: 0;
-}
-
-.reverb-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px;
-  padding: 6px 16px;
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.reverb-slider {
-  width: 110px;
-}
-
-.reverb-value {
-  min-width: 34px;
-  font-family: "SF Mono", "Fira Code", monospace;
-  font-size: 11px;
-  color: var(--accent);
-  text-align: right;
 }
 
 .export-panel {

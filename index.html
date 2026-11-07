@@ -107,6 +107,14 @@
         <div class="automation-section filter-automation-section">
           <div class="section-header">
             <span class="section-label">Low-Pass Cutoff Automation &middot; drag points, click curve to bend, right-click to toggle linear</span>
+            <div class="lane-options">
+              <label class="control-label" for="slope-select">Slope</label>
+              <select id="slope-select" class="control-select">
+                <option value="12">12 dB/oct</option>
+                <option value="24" selected>24 dB/oct</option>
+                <option value="48">48 dB/oct</option>
+              </select>
+            </div>
           </div>
           <canvas id="automation-canvas" class="automation-canvas"></canvas>
         </div>
@@ -118,33 +126,23 @@
           <canvas id="volume-canvas" class="automation-canvas"></canvas>
         </div>
 
-        <div class="reverb-bar">
-          <span class="section-label">Reverb</span>
-          <div class="control-group">
-            <label class="control-label" for="reverb-mix">Mix</label>
-            <input id="reverb-mix" class="zoom-slider reverb-slider" type="range" min="0" max="100" step="1" value="0">
-            <span id="reverb-mix-value" class="reverb-value">0%</span>
+        <div class="automation-section reverb-automation-section">
+          <div class="section-header">
+            <span class="section-label">Reverb Mix Automation &middot; drag points, click curve to bend, right-click to toggle linear</span>
+            <div class="lane-options">
+              <label class="control-label" for="reverb-decay">Decay</label>
+              <select id="reverb-decay" class="control-select">
+                <option value="0.8">Short (0.8 s)</option>
+                <option value="1.8" selected>Medium (1.8 s)</option>
+                <option value="3.2">Long (3.2 s)</option>
+              </select>
+            </div>
           </div>
-          <div class="control-group">
-            <label class="control-label" for="reverb-decay">Decay</label>
-            <select id="reverb-decay" class="control-select">
-              <option value="0.8">Short (0.8 s)</option>
-              <option value="1.8" selected>Medium (1.8 s)</option>
-              <option value="3.2">Long (3.2 s)</option>
-            </select>
-          </div>
+          <canvas id="reverb-canvas" class="automation-canvas"></canvas>
         </div>
 
         <div class="controls-bar">
           <div class="controls-left">
-            <div class="control-group">
-              <label class="control-label">Low-pass slope</label>
-              <select id="slope-select" class="control-select">
-                <option value="12">12 dB/oct</option>
-                <option value="24" selected>24 dB/oct</option>
-                <option value="48">48 dB/oct</option>
-              </select>
-            </div>
             <button id="filter-undo-btn" class="btn btn-small" disabled title="Undo (Ctrl+Z)">↩ Undo</button>
             <button id="filter-redo-btn" class="btn btn-small" disabled title="Redo (Ctrl+Shift+Z)">↪ Redo</button>
           </div>

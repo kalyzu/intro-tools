@@ -1,10 +1,12 @@
 import type { AutomationPoint } from '../automation/model';
 import type { VolumePoint } from '../automation/volume-model';
+import type { ReverbPoint } from '../automation/reverb-model';
 import type { FilterSlope } from './filter';
 import { createFilterChain, createSafetyLimiter } from './filter';
-import { DEFAULT_REVERB_SETTINGS, createReverbChain, type ReverbChain, type ReverbSettings } from './reverb';
+import { DEFAULT_REVERB_SETTINGS, createReverbChain, reverbMixGains, type ReverbChain, type ReverbSettings } from './reverb';
 import { evaluateAutomation } from '../automation/model';
 import { evaluateVolumeAutomation } from '../automation/volume-model';
+import { evaluateReverbAutomation } from '../automation/reverb-model';
 import { interpolate } from '../automation/interpolation';
 import { interpolateVolume } from '../automation/volume-interpolation';
 
@@ -27,6 +29,7 @@ export class PlaybackEngine {
   private fadeGain: GainNode | null = null;
   private reverbChain: ReverbChain | null = null;
   private reverbSettings: ReverbSettings = { ...DEFAULT_REVERB_SETTINGS };
+  private reverbPoints: ReverbPoint[] = [];
   private reverbEnabled = false;
   private buffer: AudioBuffer | null = null;
   private state: PlaybackState = 'stopped';
@@ -89,20 +92,29 @@ export class PlaybackEngine {
   setReverb(settings: ReverbSettings): void {
     const previous = this.reverbSettings;
     this.reverbSettings = { ...settings };
-    if (!this.reverbEnabled || this.state !== 'playing') return;
-    // Decay/damping changes are inaudible while the mix is fully dry.
-    if (previous.mix === 0 && settings.mix === 0) return;
+    if (!this.reverbEnabled || this.state !== 'playing' || !this.hasReverb()) return;
 
     const needsRebuild =
-      (previous.mix > 0) !== (settings.mix > 0) ||
       previous.decay !== settings.decay ||
       previous.damping !== settings.damping ||
       previous.preDelay !== settings.preDelay;
 
     if (needsRebuild) {
       this.play(Math.max(0, this.getCurrentTime()));
-    } else {
-      this.reverbChain?.setMix(settings.mix);
+    }
+  }
+
+  setReverbPoints(points: ReverbPoint[]): void {
+    const hadReverb = this.hasReverb();
+    this.reverbPoints = points;
+    if (!this.reverbEnabled || this.state !== 'playing') return;
+
+    const hasReverb = this.hasReverb();
+    if (hadReverb !== hasReverb) {
+      // Adding or removing the convolver changes the graph itself.
+      this.play(Math.max(0, this.getCurrentTime()));
+    } else if (hasReverb) {
+      this.rescheduleReverb();
     }
   }
 
@@ -112,6 +124,13 @@ export class PlaybackEngine {
     if (this.state === 'playing') {
       this.play(Math.max(0, this.getCurrentTime()));
     }
+  }
+
+  private hasReverb(): boolean {
+    for (const point of this.reverbPoints) {
+      if (point.gain > 0) return true;
+    }
+    return false;
   }
 
   getTrimDuration(): number {
@@ -181,7 +200,7 @@ export class PlaybackEngine {
     this.startTime = ctx.currentTime;
     this.pauseTime = clampedOffset;
 
-    this.buildGraph(ctx);
+    this.buildGraph(ctx, clampedOffset);
 
     const trimDuration = this.trimEnd - clampedOffset;
     try {
@@ -197,6 +216,7 @@ export class PlaybackEngine {
 
     this.scheduleFilterAutomation(clampedOffset);
     this.scheduleVolumeAutomation(clampedOffset);
+    this.scheduleReverbAutomation(clampedOffset);
     this.scheduleFadeAutomation(clampedOffset);
 
     this.state = 'playing';
@@ -217,7 +237,7 @@ export class PlaybackEngine {
 
     const clampedOffset = Math.max(this.trimStart, Math.min(this.trimEnd, this.pauseTime));
 
-    this.buildGraph(this.audioContext);
+    this.buildGraph(this.audioContext, clampedOffset);
     this.startTime = this.audioContext.currentTime;
 
     const trimDuration = this.trimEnd - clampedOffset;
@@ -234,6 +254,7 @@ export class PlaybackEngine {
 
     this.scheduleFilterAutomation(clampedOffset);
     this.scheduleVolumeAutomation(clampedOffset);
+    this.scheduleReverbAutomation(clampedOffset);
     this.scheduleFadeAutomation(clampedOffset);
 
     this.state = 'playing';
@@ -333,7 +354,7 @@ export class PlaybackEngine {
     this.reverbChain = null;
   }
 
-  private buildGraph(ctx: AudioContext): void {
+  private buildGraph(ctx: AudioContext, startOffset: number): void {
     const source = ctx.createBufferSource();
     source.buffer = this.buffer!;
     this.source = source;
@@ -368,8 +389,10 @@ export class PlaybackEngine {
       this.filters = [];
       source.connect(volumeGain);
     }
-    if (this.reverbEnabled && this.reverbSettings.mix > 0) {
-      this.reverbChain = createReverbChain(ctx, this.reverbSettings);
+    if (this.reverbEnabled && this.hasReverb()) {
+      const startTrim = Math.max(0, startOffset - this.trimStart);
+      const initialMix = evaluateReverbAutomation(this.reverbPoints, startTrim);
+      this.reverbChain = createReverbChain(ctx, this.reverbSettings, initialMix);
       volumeGain.connect(this.reverbChain.input);
       this.reverbChain.output.connect(analyser);
     } else {
@@ -437,6 +460,38 @@ export class PlaybackEngine {
     if (this.state !== 'playing' || !this.audioContext || !this.volumeGain) return;
     const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
     this.scheduleVolumeAutomation(bufTime);
+  }
+
+  private scheduleReverbAutomation(bufStartTime: number): void {
+    if (!this.audioContext || !this.reverbChain) return;
+
+    const acNow = this.audioContext.currentTime;
+    const step = 0.005;
+    const rampDuration = 0.007;
+
+    const dry = this.reverbChain.dryGain.gain;
+    const wet = this.reverbChain.wetGain.gain;
+    dry.cancelScheduledValues(0);
+    wet.cancelScheduledValues(0);
+
+    const trimTime = bufStartTime - this.trimStart;
+    const initial = reverbMixGains(evaluateReverbAutomation(this.reverbPoints, Math.max(0, trimTime)));
+    dry.setValueAtTime(initial.dry, acNow);
+    wet.setValueAtTime(initial.wet, acNow);
+
+    for (let t = bufStartTime + step; t <= this.trimEnd; t += step) {
+      const mix = evaluateReverbAutomation(this.reverbPoints, Math.max(0, t - this.trimStart));
+      const gains = reverbMixGains(mix);
+      const rampEnd = acNow + (t - bufStartTime) + rampDuration;
+      dry.linearRampToValueAtTime(gains.dry, rampEnd);
+      wet.linearRampToValueAtTime(gains.wet, rampEnd);
+    }
+  }
+
+  private rescheduleReverb(): void {
+    if (this.state !== 'playing' || !this.audioContext || !this.reverbChain) return;
+    const bufTime = this.pauseTime + (this.audioContext.currentTime - this.startTime);
+    this.scheduleReverbAutomation(bufTime);
   }
 
   private scheduleFadeAutomation(bufStartTime: number): void {

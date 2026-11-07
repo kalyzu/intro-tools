@@ -5,6 +5,8 @@ import { createDefaultAutomation } from './automation/defaults';
 import type { VolumePoint } from './automation/volume-model';
 import { sortVolumePoints, clampVolumeTime } from './automation/volume-model';
 import { createDefaultVolumeAutomation } from './automation/volume-defaults';
+import type { ReverbPoint } from './automation/reverb-model';
+import { createDefaultReverbAutomation, ensureReverbPoints, getReverbMixRange } from './automation/reverb-model';
 import { decodeAudioFile, trimAudioBuffer, type DecodedAudio } from './audio/decoder';
 import { PlaybackEngine, type PlaybackState } from './audio/playback';
 import { renderOffline } from './audio/renderer';
@@ -29,6 +31,8 @@ class LowPassEditor {
   private automationCustomized = false;
   private volumePoints: VolumePoint[] = [];
   private volumeCustomized = false;
+  private reverbPoints: ReverbPoint[] = [];
+  private reverbCustomized = false;
   private isLoadingAudio = false;
   private playbackEngine: PlaybackEngine;
   private trimWaveform: WaveformRenderer | null = null;
@@ -36,6 +40,7 @@ class LowPassEditor {
   private refWaveform: WaveformRenderer | null = null;
   private automationEditor: AutomationEditor | null = null;
   private volumeEditor: VolumeEditor | null = null;
+  private reverbEditor: VolumeEditor | null = null;
   private filterSlope: FilterSlope = 24;
   private reverb: ReverbSettings = { ...DEFAULT_REVERB_SETTINGS };
 
@@ -44,7 +49,7 @@ class LowPassEditor {
   // Per-page history
   private trimHistory: { trimStart: number; trimEnd: number }[] = [];
   private trimRedoHistory: { trimStart: number; trimEnd: number }[] = [];
-  private filterHistory: { automationPoints: AutomationPoint[]; volumePoints: VolumePoint[]; filterSlope: FilterSlope; reverb: ReverbSettings }[] = [];
+  private filterHistory: { automationPoints: AutomationPoint[]; volumePoints: VolumePoint[]; reverbPoints: ReverbPoint[]; filterSlope: FilterSlope; reverb: ReverbSettings }[] = [];
   private filterRedoHistory: typeof this.filterHistory = [];
   private markersHistory: { markers: Marker[]; suggestedMarkers: Marker[]; nextMarkerId: number }[] = [];
   private markersRedoHistory: typeof this.markersHistory = [];
@@ -128,35 +133,17 @@ class LowPassEditor {
 
     const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement;
     slopeSelect.addEventListener('change', () => {
-      this.pushFilterHistory();
       this.filterSlope = parseInt(slopeSelect.value) as FilterSlope;
       this.playbackEngine.setFilterSlope(this.filterSlope);
+      this.pushFilterHistory();
       this.updateExportInfo();
     });
 
-    const reverbMix = document.getElementById('reverb-mix') as HTMLInputElement;
-    const reverbMixValue = document.getElementById('reverb-mix-value')!;
     const reverbDecay = document.getElementById('reverb-decay') as HTMLSelectElement;
-    // Slider input fires continuously while dragging; snapshot the state before
-    // the first change of a drag, then wait for `change` to arm the next one.
-    let reverbMixInteracting = false;
-    reverbMix.addEventListener('input', () => {
-      if (!reverbMixInteracting) {
-        this.pushFilterHistory();
-        reverbMixInteracting = true;
-      }
-      this.reverb.mix = parseFloat(reverbMix.value) / 100;
-      reverbMixValue.textContent = `${Math.round(this.reverb.mix * 100)}%`;
-      this.playbackEngine.setReverb(this.reverb);
-      this.updateExportInfo();
-    });
-    reverbMix.addEventListener('change', () => {
-      reverbMixInteracting = false;
-    });
     reverbDecay.addEventListener('change', () => {
-      this.pushFilterHistory();
-      this.reverb.decay = parseFloat(reverbDecay.value);
+      this.reverb = { ...this.reverb, decay: parseFloat(reverbDecay.value) };
       this.playbackEngine.setReverb(this.reverb);
+      this.pushFilterHistory();
       this.updateExportInfo();
     });
     this.syncReverbControls();
@@ -196,6 +183,7 @@ class LowPassEditor {
     this.refWaveform.setSeekCallback((time) => {
       this.automationEditor?.clearSelection();
       this.volumeEditor?.clearSelection();
+      this.reverbEditor?.clearSelection();
       this.playbackEngine.seek(this.clampTrimTime(time));
       this.updateHomeLines();
     });
@@ -211,10 +199,11 @@ class LowPassEditor {
     this.automationEditor = new AutomationEditor(autoCanvas, {
       onPointsChange: (points) => this.onPointsChange(points),
       onPointSelect: () => {
-        // Any interaction on the filter graph clears the volume selection
+        // Any interaction on the filter graph clears the other selections
         // to prevent the "ghost" double-delete bug where a stale selection
-        // on the other graph is deleted together with the intended one.
+        // on another graph is deleted together with the intended one.
         this.volumeEditor?.clearSelection();
+        this.reverbEditor?.clearSelection();
       },
       onSeek: (time) => {
         this.playbackEngine.seek(this.clampTrimTime(time));
@@ -229,6 +218,7 @@ class LowPassEditor {
       onPointsChange: (points) => this.onVolumePointsChange(points),
       onPointSelect: () => {
         this.automationEditor?.clearSelection();
+        this.reverbEditor?.clearSelection();
       },
       onSeek: (time) => {
         this.playbackEngine.seek(this.clampTrimTime(time));
@@ -238,6 +228,27 @@ class LowPassEditor {
     this.volumeEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
     this.volumeEditor.setPanRequestCallback((delta) => this.panView(delta));
     this.volumeEditor.setAfterChangeCallback(() => this.pushFilterHistory());
+
+    const reverbCanvas = document.getElementById('reverb-canvas') as HTMLCanvasElement;
+    this.reverbEditor = new VolumeEditor(reverbCanvas, {
+      onPointsChange: (points) => this.onReverbPointsChange(points),
+      onPointSelect: () => {
+        this.automationEditor?.clearSelection();
+        this.volumeEditor?.clearSelection();
+      },
+      onSeek: (time) => {
+        this.playbackEngine.seek(this.clampTrimTime(time));
+        this.updateHomeLines();
+      },
+    }, {
+      color: '#a855f7',
+      colorLight: 'rgba(168, 85, 247, 0.25)',
+      selectionStroke: 'rgba(168, 85, 247, 0.9)',
+      selectionFill: 'rgba(168, 85, 247, 0.15)',
+    });
+    this.reverbEditor.setZoomRequestCallback((center, factor, frac) => this.zoomAt(center, factor, frac));
+    this.reverbEditor.setPanRequestCallback((delta) => this.panView(delta));
+    this.reverbEditor.setAfterChangeCallback(() => this.pushFilterHistory());
 
     const zoomSlider = document.getElementById('zoom-slider') as HTMLInputElement;
     const markerZoomSlider = document.getElementById('marker-zoom-slider') as HTMLInputElement;
@@ -369,6 +380,7 @@ class LowPassEditor {
     this.refWaveform?.render();
     this.automationEditor?.render();
     this.volumeEditor?.render();
+    this.reverbEditor?.render();
   }
 
   private setupThemeToggle(): void {
@@ -454,6 +466,8 @@ class LowPassEditor {
       this.automationCustomized = false;
       this.volumePoints = createDefaultVolumeAutomation(this.getTrimDuration());
       this.volumeCustomized = false;
+      this.reverbPoints = createDefaultReverbAutomation(this.getTrimDuration());
+      this.reverbCustomized = false;
       this.reverb = { ...DEFAULT_REVERB_SETTINGS };
       this.syncReverbControls();
       // Per-page history
@@ -473,6 +487,7 @@ class LowPassEditor {
       this.playbackEngine.setVolumePoints(this.volumePoints);
       this.playbackEngine.setFilterSlope(this.filterSlope);
       this.playbackEngine.setReverb(this.reverb);
+      this.playbackEngine.setReverbPoints(this.reverbPoints);
 
       this.trimWaveform!.setBuffer(this.decodedAudio.buffer);
       this.trimWaveform!.setTrim(this.trimStart, this.trimEnd);
@@ -482,6 +497,8 @@ class LowPassEditor {
       this.automationEditor!.setPoints(this.automationPoints);
       this.volumeEditor!.setDuration(this.getTrimDuration());
       this.volumeEditor!.setPoints(this.volumePoints);
+      this.reverbEditor!.setDuration(this.getTrimDuration());
+      this.reverbEditor!.setPoints(this.reverbPoints);
 
       this.showModeScreen();
 
@@ -553,19 +570,22 @@ class LowPassEditor {
     if (chEl) chEl.textContent = buffer ? String(buffer.numberOfChannels) : '\u2014';
     if (slopeEl) slopeEl.textContent = `${this.filterSlope} dB/oct`;
     if (reverbEl) {
-      reverbEl.textContent = this.reverb.mix > 0
-        ? `${Math.round(this.reverb.mix * 100)}% \u00b7 ${this.reverb.decay.toFixed(1)} s`
-        : 'Off';
+      const range = getReverbMixRange(this.reverbPoints);
+      if (range.max <= 0) {
+        reverbEl.textContent = 'Off';
+      } else {
+        const minPercent = Math.round(range.min * 100);
+        const maxPercent = Math.round(range.max * 100);
+        const mix = minPercent === maxPercent
+          ? `${maxPercent}%`
+          : `${minPercent}\u2013${maxPercent}%`;
+        reverbEl.textContent = `${mix} \u00b7 ${this.reverb.decay.toFixed(1)} s`;
+      }
     }
   }
 
   private syncReverbControls(): void {
-    const mix = document.getElementById('reverb-mix') as HTMLInputElement | null;
-    const mixValue = document.getElementById('reverb-mix-value');
     const decay = document.getElementById('reverb-decay') as HTMLSelectElement | null;
-    const percent = Math.round(this.reverb.mix * 100);
-    if (mix) mix.value = String(percent);
-    if (mixValue) mixValue.textContent = `${percent}%`;
     if (decay) decay.value = String(this.reverb.decay);
   }
 
@@ -594,6 +614,7 @@ class LowPassEditor {
 
     this.automationEditor?.setActive(isFilter);
     this.volumeEditor?.setActive(isFilter);
+    this.reverbEditor?.setActive(isFilter);
     this.playbackEngine.setFilterEnabled(!isTrim);
     this.playbackEngine.setReverbEnabled(!isTrim);
 
@@ -619,6 +640,7 @@ class LowPassEditor {
       this.refWaveform?.setView(this.view);
       this.automationEditor?.setView(this.view);
       this.volumeEditor?.setView(this.view);
+      this.reverbEditor?.setView(this.view);
     }
   }
 
@@ -629,6 +651,7 @@ class LowPassEditor {
     this.refWaveform?.setHomeTime(home);
     this.automationEditor?.setHomeTime(home);
     this.volumeEditor?.setHomeTime(home);
+    this.reverbEditor?.setHomeTime(home);
   }
 
   private getMaximumZoom(): number {
@@ -752,12 +775,14 @@ class LowPassEditor {
 
     this.ensureAutomationFits(trimmedDuration);
     this.ensureVolumeFits(trimmedDuration);
+    this.ensureReverbFits(trimmedDuration);
     this.playbackEngine.setBuffer(this.trimmedBuffer);
     this.playbackEngine.setTrim(0, trimmedDuration);
     this.playbackEngine.setAutomationPoints(this.automationPoints);
     this.playbackEngine.setVolumePoints(this.volumePoints);
     this.playbackEngine.setFilterSlope(this.filterSlope);
     this.playbackEngine.setReverb(this.reverb);
+    this.playbackEngine.setReverbPoints(this.reverbPoints);
 
     this.refWaveform!.setBuffer(this.trimmedBuffer);
     this.markerWaveform!.setBuffer(this.trimmedBuffer);
@@ -772,6 +797,8 @@ class LowPassEditor {
     this.automationEditor!.setPoints(this.automationPoints);
     this.volumeEditor!.setDuration(trimmedDuration);
     this.volumeEditor!.setPoints(this.volumePoints);
+    this.reverbEditor!.setDuration(trimmedDuration);
+    this.reverbEditor!.setPoints(this.reverbPoints);
 
     // Push initial state for filter page if not already
     if (this.filterHistory.length === 0) {
@@ -849,6 +876,11 @@ class LowPassEditor {
     // Do not push history here - caller will handle per-page history
   }
 
+  private ensureReverbFits(duration: number): void {
+    this.reverbPoints = ensureReverbPoints(this.reverbPoints, duration);
+    // Do not push history here - caller will handle per-page history
+  }
+
   private onTrimChange(start: number, end: number): void {
     this.trimStart = start;
     this.trimEnd = end;
@@ -865,8 +897,14 @@ class LowPassEditor {
       this.playbackEngine.setVolumePoints(this.volumePoints);
       this.volumeEditor?.setPoints(this.volumePoints);
     }
+    if (!this.reverbCustomized) {
+      this.reverbPoints = createDefaultReverbAutomation(duration);
+      this.playbackEngine.setReverbPoints(this.reverbPoints);
+      this.reverbEditor?.setPoints(this.reverbPoints);
+    }
     this.automationEditor?.setDuration(duration);
     this.volumeEditor?.setDuration(duration);
+    this.reverbEditor?.setDuration(duration);
     this.updateTrimDisplay();
   }
 
@@ -1164,6 +1202,15 @@ class LowPassEditor {
     this.updateUndoRedoButtons();
   }
 
+  private onReverbPointsChange(points: ReverbPoint[]): void {
+    this.reverbPoints = sortVolumePoints(points);
+    this.reverbCustomized = true;
+    this.playbackEngine.setReverbPoints(this.reverbPoints);
+    this.updateExportInfo();
+    // History pushed at drag end via onAfterChange, not here
+    this.updateUndoRedoButtons();
+  }
+
   private onTimeUpdate(time: number): void {
     if (this.mode === 'trim') {
       this.trimWaveform?.setPlayhead(time + this.trimStart);
@@ -1173,6 +1220,7 @@ class LowPassEditor {
       this.refWaveform?.setPlayhead(time);
       this.automationEditor?.setPlayhead(time);
       this.volumeEditor?.setPlayhead(time);
+      this.reverbEditor?.setPlayhead(time);
     }
 
     const trimDisplay = document.getElementById('trim-time-display');
@@ -1253,6 +1301,7 @@ class LowPassEditor {
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
     this.volumeEditor?.setPlayhead(home);
+    this.reverbEditor?.setPlayhead(home);
     this.clearBeatDisplay();
     // Show selected marker after stop if any
     if (this.selectedMarkerId !== null) {
@@ -1282,6 +1331,7 @@ class LowPassEditor {
     this.refWaveform?.setPlayhead(home);
     this.automationEditor?.setPlayhead(home);
     this.volumeEditor?.setPlayhead(home);
+    this.reverbEditor?.setPlayhead(home);
     this.clearBeatDisplay();
     if (this.selectedMarkerId !== null) {
       const sel = this.markers.find(m => m.id === this.selectedMarkerId);
@@ -1303,7 +1353,7 @@ class LowPassEditor {
     btn.disabled = true;
 
     try {
-      const blob = await renderOffline(buffer, this.automationPoints, this.volumePoints, this.filterSlope, this.reverb, start, end);
+      const blob = await renderOffline(buffer, this.automationPoints, this.volumePoints, this.reverbPoints, this.filterSlope, this.reverb, start, end);
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1352,6 +1402,7 @@ class LowPassEditor {
     this.filterHistory.push({
       automationPoints: this.automationPoints.map(p => ({ ...p })),
       volumePoints: this.volumePoints.map(p => ({ ...p })),
+      reverbPoints: this.reverbPoints.map(p => ({ ...p })),
       filterSlope: this.filterSlope,
       reverb: { ...this.reverb },
     });
@@ -1435,14 +1486,17 @@ class LowPassEditor {
     const prev = this.filterHistory[this.filterHistory.length - 1];
     this.automationPoints = prev.automationPoints.map(p => ({ ...p }));
     this.volumePoints = prev.volumePoints.map(p => ({ ...p }));
+    this.reverbPoints = prev.reverbPoints.map(p => ({ ...p }));
     this.filterSlope = prev.filterSlope;
     this.reverb = { ...prev.reverb };
     this.playbackEngine.setAutomationPoints(this.automationPoints);
     this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.playbackEngine.setReverbPoints(this.reverbPoints);
     this.playbackEngine.setFilterSlope(this.filterSlope);
     this.playbackEngine.setReverb(this.reverb);
     this.automationEditor?.setPoints(this.automationPoints);
     this.volumeEditor?.setPoints(this.volumePoints);
+    this.reverbEditor?.setPoints(this.reverbPoints);
     this.syncReverbControls();
     const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement | null;
     if (slopeSelect) slopeSelect.value = String(this.filterSlope);
@@ -1456,14 +1510,17 @@ class LowPassEditor {
     this.filterHistory.push(next);
     this.automationPoints = next.automationPoints.map(p => ({ ...p }));
     this.volumePoints = next.volumePoints.map(p => ({ ...p }));
+    this.reverbPoints = next.reverbPoints.map(p => ({ ...p }));
     this.filterSlope = next.filterSlope;
     this.reverb = { ...next.reverb };
     this.playbackEngine.setAutomationPoints(this.automationPoints);
     this.playbackEngine.setVolumePoints(this.volumePoints);
+    this.playbackEngine.setReverbPoints(this.reverbPoints);
     this.playbackEngine.setFilterSlope(this.filterSlope);
     this.playbackEngine.setReverb(this.reverb);
     this.automationEditor?.setPoints(this.automationPoints);
     this.volumeEditor?.setPoints(this.volumePoints);
+    this.reverbEditor?.setPoints(this.reverbPoints);
     this.syncReverbControls();
     const slopeSelect = document.getElementById('slope-select') as HTMLSelectElement | null;
     if (slopeSelect) slopeSelect.value = String(this.filterSlope);
