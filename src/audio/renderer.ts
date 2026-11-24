@@ -14,6 +14,30 @@ export interface RenderProgress {
   progress: number;
 }
 
+// MP3 supports a fixed set of sample rates. Rendering at one of them lets the
+// browser resample natively (only when the source uses an unsupported rate)
+// instead of making the encoder handle an invalid rate.
+const MP3_SAMPLE_RATES = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000] as const;
+
+// Cap the automation curves at ~240k points. setValueCurveAtTime interpolates
+// between points at audio rate, so 1 ms resolution is already far finer than a
+// filter sweep needs. Building one value per sample instead costs tens of
+// millions of function calls (16+ s for a 4 minute clip) and freezes the UI.
+const MAX_CURVE_POINTS = 240_000;
+const MIN_CURVE_STEP = 0.001;
+
+function toMp3SampleRate(sampleRate: number): number {
+  for (let i = MP3_SAMPLE_RATES.length - 1; i >= 0; i--) {
+    if (MP3_SAMPLE_RATES[i] <= sampleRate) return MP3_SAMPLE_RATES[i];
+  }
+  return MP3_SAMPLE_RATES[0];
+}
+
+/**
+ * Renders the filtered clip offline and returns the raw samples, ready for
+ * encoding. The result uses an MP3-supported sample rate and at most 2
+ * channels so the encoder can consume it directly.
+ */
 export async function renderOffline(
   buffer: AudioBuffer,
   points: AutomationPoint[],
@@ -24,13 +48,43 @@ export async function renderOffline(
   trimStart: number,
   trimEnd: number,
   onProgress?: (p: RenderProgress) => void
-): Promise<Blob> {
-  const sampleRate = buffer.sampleRate;
-  const channels = buffer.numberOfChannels;
+): Promise<AudioBuffer> {
+  const sampleRate = toMp3SampleRate(buffer.sampleRate);
+  // MP3 is mono or stereo. If the source has more channels, let the offline
+  // context fold them down instead of allocating/encoding channels that would
+  // be discarded.
+  const channels = Math.max(1, Math.min(2, buffer.numberOfChannels));
   const trimDuration = trimEnd - trimStart;
   const trimLength = Math.ceil(trimDuration * sampleRate);
 
   const offlineCtx = new OfflineAudioContext(channels, trimLength, sampleRate);
+
+  // Report real render progress by suspending the offline graph at a few
+  // checkpoints. Rendering runs faster than real time and exposes no progress
+  // events, so without this the bar could only jump from 0 to 100.
+  if (onProgress && trimDuration > 0.25 && typeof offlineCtx.suspend === 'function') {
+    const steps = 20;
+    try {
+      for (let i = 1; i < steps; i++) {
+        const at = (i / steps) * trimDuration;
+        offlineCtx
+          .suspend(at)
+          .then(() => {
+            try {
+              onProgress({ progress: i / steps });
+            } finally {
+              void offlineCtx.resume();
+            }
+          })
+          .catch(() => {
+            // Ignore: progress reporting is best-effort and must never break
+            // the actual export.
+          });
+      }
+    } catch {
+      // Same: fall back to no intermediate render progress.
+    }
+  }
 
   const source = offlineCtx.createBufferSource();
   source.buffer = buffer;
@@ -65,15 +119,21 @@ export async function renderOffline(
   limiter.connect(fadeGain);
   fadeGain.connect(offlineCtx.destination);
 
-  // Sample-accurate automation for offline: use setValueCurveAtTime (per-sample)
-  // to avoid the 5ms step / 7ms ramp quantisation that caused transients on
-  // lowpass sweeps during export (vs smooth playback). Playback keeps the
-  // coarse ramps for real-time performance; offline can afford per-sample.
+  // High-resolution automation for offline: setValueCurveAtTime interpolates
+  // between points at audio rate, avoiding the 5ms step / 7ms ramp quantisation
+  // that caused transients on lowpass sweeps during export (vs smooth playback).
+  // 1 ms breakpoints are inaudibly close to per-sample while keeping generation
+  // fast enough that the export UI can paint before the render starts.
   if (trimLength > 0) {
-    const freqCurve = new Float32Array(trimLength);
-    for (let i = 0; i < trimLength; i++) {
-      const t = i / sampleRate;
-      freqCurve[i] = Math.max(1, evaluateAutomation(points, t, interpolate));
+    const curvePoints = Math.max(
+      2,
+      Math.min(trimLength, MAX_CURVE_POINTS, Math.ceil(trimDuration / MIN_CURVE_STEP) + 1)
+    );
+    const curveStep = trimDuration / (curvePoints - 1);
+
+    const freqCurve = new Float32Array(curvePoints);
+    for (let i = 0; i < curvePoints; i++) {
+      freqCurve[i] = Math.max(1, evaluateAutomation(points, i * curveStep, interpolate));
     }
     for (const filter of filters) {
       // @ts-ignore - setValueCurveAtTime is available on OfflineAudioContext
@@ -85,17 +145,16 @@ export async function renderOffline(
         const rampDuration = 0.007;
         filter.frequency.setValueAtTime(freqCurve[0], 0);
         for (let t = step; t <= trimDuration; t += step) {
-          const freq = freqCurve[Math.min(Math.floor(t * sampleRate), freqCurve.length - 1)];
+          const freq = freqCurve[Math.min(Math.floor(t / curveStep), curvePoints - 1)];
           filter.frequency.exponentialRampToValueAtTime(freq, t + rampDuration);
         }
       }
     }
 
     if (volumePoints && volumePoints.length > 0) {
-      const gainCurve = new Float32Array(trimLength);
-      for (let i = 0; i < trimLength; i++) {
-        const t = i / sampleRate;
-        gainCurve[i] = Math.max(0, Math.min(2, evaluateVolumeAutomation(volumePoints, t, interpolateVolume)));
+      const gainCurve = new Float32Array(curvePoints);
+      for (let i = 0; i < curvePoints; i++) {
+        gainCurve[i] = Math.max(0, Math.min(2, evaluateVolumeAutomation(volumePoints, i * curveStep, interpolateVolume)));
       }
       // @ts-ignore
       if (typeof (volumeGain.gain as any).setValueCurveAtTime === 'function') {
@@ -105,7 +164,7 @@ export async function renderOffline(
         const rampDuration = 0.007;
         volumeGain.gain.setValueAtTime(gainCurve[0], 0);
         for (let t = step; t <= trimDuration; t += step) {
-          const gain = gainCurve[Math.min(Math.floor(t * sampleRate), gainCurve.length - 1)];
+          const gain = gainCurve[Math.min(Math.floor(t / curveStep), curvePoints - 1)];
           volumeGain.gain.linearRampToValueAtTime(gain, t + rampDuration);
         }
       }
@@ -164,63 +223,5 @@ export async function renderOffline(
     onProgress({ progress: 1 });
   }
 
-  return audioBufferToWav(renderedBuffer);
-}
-
-function audioBufferToWav(buffer: AudioBuffer): Blob {
-  const numChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const format = 1;
-  const bitDepth = 16;
-
-  const bytesPerSample = bitDepth / 8;
-  const blockAlign = numChannels * bytesPerSample;
-
-  const dataLength = buffer.length * blockAlign;
-  const bufferLength = 44 + dataLength;
-
-  const arrayBuffer = new ArrayBuffer(bufferLength);
-  const view = new DataView(arrayBuffer);
-
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, bufferLength - 8, true);
-  writeString(view, 8, 'WAVE');
-
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, format, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * blockAlign, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitDepth, true);
-
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataLength, true);
-
-  const channels: Float32Array[] = [];
-  for (let i = 0; i < numChannels; i++) {
-    channels.push(buffer.getChannelData(i));
-  }
-
-  let offset = 44;
-  for (let i = 0; i < buffer.length; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      // Clamp: the limiter above keeps peaks under 1.0, but never trust float
-      // for int16 — an unclamped over-1.0 sample wraps around in setInt16
-      // (e.g. 1.1 -> large negative), a full-scale single-sample pop/static.
-      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
-      const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-      view.setInt16(offset, int16, true);
-      offset += 2;
-    }
-  }
-
-  return new Blob([arrayBuffer], { type: 'audio/wav' });
-}
-
-function writeString(view: DataView, offset: number, str: string): void {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
+  return renderedBuffer;
 }

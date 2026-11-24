@@ -38,7 +38,7 @@ Double-click the waveform or press <kbd>A</kbd> to place a marker. Drag to align
 
 ### Export
 
-- **Export Audio** — downloads the trimmed and filtered clip as a 16-bit WAV file
+- **Export MP3** — downloads the trimmed and filtered clip as a 192 kbps MP3 file, with a progress bar while it renders and encodes
 - **Export Timestamps** — downloads marker times as a plain text file (one timestamp per line, in seconds)
 
 ## Contribution
@@ -59,7 +59,7 @@ npm run build    # Production build in dist/
 - Vite
 - Web Audio API (AudioContext, OfflineAudioContext, BiquadFilterNode)
 - Canvas 2D for waveform and automation rendering
-- Zero runtime dependencies
+- MP3 encoding via [`@breezystack/lamejs`](https://www.npmjs.com/package/@breezystack/lamejs) in a Web Worker
 
 **Disclaimer**
 

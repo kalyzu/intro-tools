@@ -43,7 +43,15 @@
 
     <div id="loading-indicator" class="loading-indicator" role="status" aria-live="polite" hidden>
       <span class="loading-spinner" aria-hidden="true"></span>
-      <span id="loading-label">Loading audio…</span>
+      <div class="loading-body">
+        <div class="loading-row">
+          <span id="loading-label">Loading audio…</span>
+          <span id="loading-percent" class="loading-percent" aria-hidden="true" hidden></span>
+        </div>
+        <div id="loading-progress" class="loading-progress" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+          <div id="loading-progress-fill" class="loading-progress-fill"></div>
+        </div>
+      </div>
     </div>
 
     <div id="screen-trim" class="screen">
@@ -169,7 +177,7 @@
           <div class="export-panel-left">
             <div class="export-panel-header">
               <span class="section-label">Export</span>
-              <span class="export-hint">The filtered clip and marker timestamps. Markers are written to a separate <code>.txt</code> file and are not embedded in the audio.</span>
+              <span class="export-hint">The filtered clip is exported as an MP3 (192 kbps). Markers are written to a separate <code>.txt</code> file and are not embedded in the audio.</span>
             </div>
 
             <div class="export-info-grid">
@@ -186,6 +194,10 @@
                 <span id="export-channels" class="info-value">&mdash;</span>
               </div>
               <div class="info-item">
+                <span class="info-label">Format</span>
+                <span class="info-value">MP3 &middot; 192 kbps</span>
+              </div>
+              <div class="info-item">
                 <span class="info-label">Low-pass slope</span>
                 <span id="export-slope" class="info-value">&mdash;</span>
               </div>
@@ -196,7 +208,7 @@
             </div>
 
             <div class="export-actions">
-              <button id="export-audio-btn" class="btn btn-export">Export Audio</button>
+              <button id="export-audio-btn" class="btn btn-export">Export MP3</button>
               <button id="export-timestamps-btn" class="btn btn-export-secondary" disabled>Export Timestamps</button>
             </div>
           </div>
@@ -260,7 +272,7 @@
           Motion Graphics Music Cutter (MGMC) is a small in-browser tool to cut music for motion graphics. It runs entirely locally — your audio never leaves your machine.
         </p>
         <p class="info-text">
-          <strong>How it works:</strong> import an audio file, trim the region you want, shape the lowpass cutoff envelope (drag points, bend the curve, right-click a point to toggle linear), place beat markers, then export the audio clip and the timestamp list.
+          <strong>How it works:</strong> import an audio file, trim the region you want, shape the lowpass cutoff envelope (drag points, bend the curve, right-click a point to toggle linear), place beat markers, then export the clip as an MP3 and the timestamp list.
         </p>
         <p class="info-text">
           <strong>Controls:</strong>

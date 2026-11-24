@@ -10,6 +10,7 @@ import { createDefaultReverbAutomation, ensureReverbPoints, getReverbMixRange } 
 import { decodeAudioFile, trimAudioBuffer, type DecodedAudio } from './audio/decoder';
 import { PlaybackEngine, type PlaybackState } from './audio/playback';
 import { renderOffline } from './audio/renderer';
+import { encodeMp3 } from './audio/mp3';
 import { WaveformRenderer } from './waveform/renderer';
 import { AutomationEditor } from './ui/automation-editor';
 import { VolumeEditor } from './ui/volume-editor';
@@ -34,6 +35,7 @@ class LowPassEditor {
   private reverbPoints: ReverbPoint[] = [];
   private reverbCustomized = false;
   private isLoadingAudio = false;
+  private isExporting = false;
   private playbackEngine: PlaybackEngine;
   private trimWaveform: WaveformRenderer | null = null;
   private markerWaveform: WaveformRenderer | null = null;
@@ -407,16 +409,60 @@ class LowPassEditor {
     return Math.max(0, Math.min(this.getTrimDuration(), time));
   }
 
-  private setLoading(loading: boolean, message?: string): void {
+  private setLoading(loading: boolean, message?: string, progress?: number | null): void {
     const indicator = document.getElementById('loading-indicator');
     const label = document.getElementById('loading-label');
     if (label && message) label.textContent = message;
     if (indicator) indicator.hidden = !loading;
+    this.setLoadingProgress(loading ? progress ?? null : null);
+  }
+
+  private setLoadingProgress(progress: number | null): void {
+    const indicator = document.getElementById('loading-indicator');
+    const bar = document.getElementById('loading-progress');
+    const fill = document.getElementById('loading-progress-fill');
+    const percent = document.getElementById('loading-percent');
+    const spinner = indicator?.querySelector('.loading-spinner') as HTMLElement | null;
+
+    if (progress === null) {
+      if (bar) bar.hidden = true;
+      if (percent) percent.hidden = true;
+      if (spinner) spinner.hidden = false;
+      return;
+    }
+
+    const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
+    if (bar) {
+      bar.hidden = false;
+      bar.setAttribute('aria-valuenow', String(pct));
+    }
+    if (fill) fill.style.width = `${pct}%`;
+    if (percent) {
+      percent.hidden = false;
+      percent.textContent = `${pct}%`;
+    }
+    if (spinner) spinner.hidden = true;
   }
 
   private yieldToUI(): Promise<void> {
     return new Promise(resolve => {
       setTimeout(resolve, 0);
+    });
+  }
+
+  private yieldToPaint(): Promise<void> {
+    // Two frames: the first lets the browser run style/layout, the second
+    // resolves after the frame containing the loading indicator has painted.
+    // The timeout keeps the export moving if rAF is paused (e.g. background tab).
+    return new Promise(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      requestAnimationFrame(() => requestAnimationFrame(done));
+      setTimeout(done, 100);
     });
   }
 
@@ -1342,24 +1388,59 @@ class LowPassEditor {
 
   private async exportAudio(): Promise<void> {
     const buffer = this.trimmedBuffer ?? this.decodedAudio?.buffer ?? null;
-    if (!buffer) return;
+    if (!buffer || this.isExporting) return;
 
     const start = this.trimmedBuffer ? 0 : this.trimStart;
     const end = this.trimmedBuffer ? buffer.duration : this.trimEnd;
 
     const btn = document.getElementById('export-audio-btn') as HTMLButtonElement;
     const originalText = btn.textContent;
-    btn.textContent = 'Exporting...';
+    this.isExporting = true;
+    btn.textContent = 'Exporting…';
     btn.disabled = true;
 
+    // Rendering is usually much faster than MP3 encoding, so it gets the
+    // smaller slice of the bar. Both phases report real progress.
+    const renderWeight = 0.2;
+    const updateProgress = (rendering: boolean, progress: number) => {
+      const overall = rendering
+        ? progress * renderWeight
+        : renderWeight + progress * (1 - renderWeight);
+      this.setLoading(true, rendering ? 'Rendering filtered audio…' : 'Encoding MP3…', overall);
+    };
+
+    // Start indeterminate: if the browser cannot report intermediate render
+    // progress, the spinner keeps moving until encoding (which always reports
+    // real progress) begins.
+    this.setLoading(true, 'Rendering filtered audio…');
+
     try {
-      const blob = await renderOffline(buffer, this.automationPoints, this.volumePoints, this.reverbPoints, this.filterSlope, this.reverb, start, end);
+      // Let the browser paint the indicator before the (brief) synchronous
+      // render setup. Without this the first visible sign of progress can be
+      // delayed for seconds on long clips.
+      await this.yieldToPaint();
+
+      const rendered = await renderOffline(
+        buffer,
+        this.automationPoints,
+        this.volumePoints,
+        this.reverbPoints,
+        this.filterSlope,
+        this.reverb,
+        start,
+        end,
+        (p) => updateProgress(true, p.progress)
+      );
+
+      const blob = await encodeMp3(rendered, {
+        onProgress: (progress) => updateProgress(false, progress),
+      });
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       const baseName = document.getElementById('file-name')!.textContent.replace(/\.[^.]+$/, '');
-      a.download = `${baseName}_filtered.wav`;
+      a.download = `${baseName}_filtered.mp3`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1368,8 +1449,10 @@ class LowPassEditor {
       console.error('Export failed:', err);
       alert('Export failed. Please try again.');
     } finally {
+      this.isExporting = false;
       btn.textContent = originalText;
       btn.disabled = false;
+      this.setLoading(false);
     }
   }
 
